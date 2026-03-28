@@ -2,14 +2,20 @@
 aeroplan_registrar.py
 Automates Aeroplan account signup at aircanada.com.
 
-The signup form may present a CAPTCHA. If detected, a CaptchaRequiredError
-is raised so callers can handle it gracefully (e.g. fall back to manual
-registration or a solving service).
+The signup form is a 3-step wizard:
+  Step 1: Email + password + T&Cs
+  Step 2: Personal info (name, DOB, gender)
+  Step 3: Contact info (address, phone)
+
+If a CAPTCHA is detected, CaptchaRequiredError is raised.
 """
 
 import asyncio
+import os
 import re
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/tmp/pw-browsers")
 
 ENROLMENT_URL = "https://www.aircanada.com/aeroplan/member/enrolment"
 
@@ -44,8 +50,12 @@ async def register_account(client: dict) -> dict:
     """
     playwright = await async_playwright().start()
     browser = await playwright.chromium.launch(
-        headless=False,
-        executable_path="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        headless=True,
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+        ],
     )
     context = await browser.new_context(
         viewport={"width": 1280, "height": 900},
@@ -57,161 +67,204 @@ async def register_account(client: dict) -> dict:
     )
     page = await context.new_page()
 
+    # Stealth: mask automation indicators
     try:
-        print(f"[registrar] Navigating to {ENROLMENT_URL}")
-        await page.goto(ENROLMENT_URL, wait_until="domcontentloaded")
-        await page.wait_for_timeout(3000)
+        from playwright_stealth import stealth_async
+        await stealth_async(page)
+    except ImportError:
+        pass
 
-        # ── CAPTCHA detection ────────────────────────────────────────────────
+    # Remove webdriver flag
+    await page.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        window.chrome = { runtime: {} };
+    """)
+
+    try:
+        print(f"[registrar] Navigating to enrolment page", flush=True)
+        await page.goto(ENROLMENT_URL, wait_until="load", timeout=30000)
+
+        # Wait for the form to render
+        await page.wait_for_selector('input[name="emailAddress"]', timeout=15000)
+        print("[registrar] Step 1: email + password", flush=True)
+
+        # CAPTCHA check
         if await _captcha_present(page):
-            raise CaptchaRequiredError(
-                "CAPTCHA detected on the Aeroplan enrolment page. "
-                "Manual intervention or a CAPTCHA-solving service is required."
-            )
+            raise CaptchaRequiredError("CAPTCHA detected before form fill.")
 
-        # ── Parse DOB ────────────────────────────────────────────────────────
+        # ── Step 1: Email + password ─────────────────────────────────────────
+        # Use type() not fill() — Angular needs real keyboard events
+        await page.click('input[name="emailAddress"]')
+        await page.type('input[name="emailAddress"]', client["email"], delay=40)
+        await page.wait_for_timeout(200)
+        await page.click('input[name="password"]')
+        await page.type('input[name="password"]', client["password"], delay=40)
+        await page.keyboard.press('Tab')
+        await page.wait_for_timeout(400)
+
+        # Dismiss OneTrust cookie banner if present (it blocks clicks)
+        try:
+            accept_btn = await page.query_selector('#onetrust-accept-btn-handler, button:has-text("Accept all")')
+            if accept_btn:
+                await accept_btn.click()
+                await page.wait_for_timeout(1000)
+        except Exception:
+            pass
+
+        # Accept T&Cs — use JS to check the MDC checkbox and fire Angular's change event
+        await page.evaluate("""
+            const input = document.querySelector('input#checkBox-input');
+            if (input && !input.checked) {
+                input.checked = true;
+                ['click', 'change', 'input'].forEach(evt =>
+                    input.dispatchEvent(new Event(evt, {bubbles: true}))
+                );
+            }
+        """)
+
+        # Click Continue
+        await page.click('button:has-text("Continue")')
+        print("[registrar] Step 1 submitted", flush=True)
+
+        # ── Step 2: Personal information ─────────────────────────────────────
+        # Wait for first name field
+        await page.wait_for_selector('input[name="firstName"], input[id*="firstName"]', timeout=15000)
+        print("[registrar] Step 2: personal info", flush=True)
+
+        if await _captcha_present(page):
+            raise CaptchaRequiredError("CAPTCHA detected on step 2.")
+
+        # Parse DOB: DD/MM/YYYY
         dob_parts = client["dob"].split("/")
         if len(dob_parts) != 3:
             raise ValueError(f"dob must be DD/MM/YYYY, got: {client['dob']!r}")
         dob_day, dob_month, dob_year = dob_parts
 
-        # ── Fill personal information ─────────────────────────────────────────
-        print("[registrar] Filling personal information")
-
-        # First / last name — field selectors vary by form version; try several
-        for sel in ['input[name="firstName"]', 'input[id*="firstName"]', '#firstName']:
+        # Fill name fields
+        for sel in ['input[name="firstName"]', 'input[id*="firstName"]']:
             try:
-                await page.wait_for_selector(sel, timeout=3000)
                 await page.fill(sel, client["first_name"])
                 break
-            except PlaywrightTimeoutError:
+            except Exception:
                 continue
 
-        for sel in ['input[name="lastName"]', 'input[id*="lastName"]', '#lastName']:
+        for sel in ['input[name="lastName"]', 'input[id*="lastName"]']:
             try:
                 await page.fill(sel, client["last_name"])
                 break
             except Exception:
                 continue
 
-        # Date of birth
-        for sel in ['input[name="dateOfBirth"]', 'input[id*="dob"]', '#dateOfBirth']:
+        # DOB — try combined field first, then separate selects
+        dob_filled = False
+        for sel in ['input[name="dateOfBirth"]', 'input[id*="dob"]', 'input[id*="dateOfBirth"]']:
             try:
-                await page.fill(sel, client["dob"])
-                break
+                el = await page.query_selector(sel)
+                if el:
+                    await page.fill(sel, client["dob"])
+                    dob_filled = True
+                    break
             except Exception:
                 continue
 
-        # Some forms use separate day/month/year selects
+        if not dob_filled:
+            # Try separate day/month/year selects or inputs
+            try:
+                await page.select_option('select[name*="day"], select[id*="day"]', value=dob_day.lstrip("0") or "1")
+                await page.select_option('select[name*="month"], select[id*="month"]', value=dob_month.lstrip("0") or "1")
+                await page.select_option('select[name*="year"], select[id*="year"]', value=dob_year)
+            except Exception:
+                pass
+
+        # Gender (pick first option if present)
         try:
-            await page.select_option('select[name*="day"], select[id*="day"]',   value=dob_day.lstrip("0") or "1")
-            await page.select_option('select[name*="month"], select[id*="month"]', value=dob_month.lstrip("0") or "1")
-            await page.select_option('select[name*="year"], select[id*="year"]',  value=dob_year)
+            gender_sel = await page.query_selector('select[name*="gender"], select[id*="gender"]')
+            if gender_sel:
+                options = await gender_sel.query_selector_all('option')
+                if len(options) > 1:
+                    val = await options[1].get_attribute("value")
+                    await page.select_option('select[name*="gender"], select[id*="gender"]', value=val)
         except Exception:
-            pass  # DOB might already be handled by the combined field above
+            pass
 
-        # Phone
-        for sel in ['input[name="phone"]', 'input[id*="phone"]', 'input[type="tel"]']:
-            try:
-                await page.fill(sel, client.get("phone", ""))
-                break
-            except Exception:
-                continue
+        # Continue to step 3
+        await page.click('button:has-text("Continue")')
+        print("[registrar] Step 2 submitted", flush=True)
 
-        # Address — simplified to street + city fields
+        # ── Step 3: Contact information ──────────────────────────────────────
+        await page.wait_for_timeout(5000)
+        print("[registrar] Step 3: contact info", flush=True)
+
+        if await _captcha_present(page):
+            raise CaptchaRequiredError("CAPTCHA detected on step 3.")
+
+        # Address
         address_parts = [p.strip() for p in client.get("address", "").split(",")]
         if address_parts:
             for sel in ['input[name="address"]', 'input[name="addressLine1"]', 'input[id*="address"]']:
                 try:
-                    await page.fill(sel, address_parts[0])
-                    break
+                    el = await page.query_selector(sel)
+                    if el:
+                        await page.fill(sel, address_parts[0])
+                        break
                 except Exception:
                     continue
+
         if len(address_parts) > 1:
             for sel in ['input[name="city"]', 'input[id*="city"]']:
                 try:
-                    await page.fill(sel, address_parts[1])
-                    break
+                    el = await page.query_selector(sel)
+                    if el:
+                        await page.fill(sel, address_parts[1])
+                        break
                 except Exception:
                     continue
 
-        # ── Email & password ─────────────────────────────────────────────────
-        print("[registrar] Filling email and password")
-        for sel in ['input[name="email"]', 'input[type="email"]', 'input[id*="email"]']:
+        # Phone
+        for sel in ['input[name="phone"]', 'input[id*="phone"]', 'input[type="tel"]']:
             try:
-                await page.fill(sel, client["email"])
-                break
-            except Exception:
-                continue
-
-        for sel in ['input[name="password"]', 'input[type="password"]', 'input[id*="password"]']:
-            try:
-                await page.fill(sel, client["password"])
-                break
-            except Exception:
-                continue
-
-        # Confirm password field (if present)
-        for sel in ['input[name="confirmPassword"]', 'input[id*="confirmPassword"]']:
-            try:
-                await page.fill(sel, client["password"])
-                break
-            except Exception:
-                continue
-
-        # ── Accept T&Cs ──────────────────────────────────────────────────────
-        for sel in [
-            'input[type="checkbox"][name*="terms"]',
-            'input[type="checkbox"][id*="terms"]',
-            'input[type="checkbox"][name*="agree"]',
-        ]:
-            try:
-                checkbox = await page.query_selector(sel)
-                if checkbox and not await checkbox.is_checked():
-                    await checkbox.check()
-                break
-            except Exception:
-                continue
-
-        # ── Submit ───────────────────────────────────────────────────────────
-        print("[registrar] Submitting enrolment form")
-        for sel in [
-            'button[type="submit"]',
-            'input[type="submit"]',
-            'button:has-text("Join")',
-            'button:has-text("Enroll")',
-            'button:has-text("Register")',
-        ]:
-            try:
-                submit_btn = await page.query_selector(sel)
-                if submit_btn:
-                    await submit_btn.click()
+                el = await page.query_selector(sel)
+                if el:
+                    await page.fill(sel, client.get("phone", ""))
                     break
             except Exception:
                 continue
 
-        await page.wait_for_timeout(5000)
+        # Final submit
+        for sel in [
+            'button[type="submit"]',
+            'button:has-text("Join")',
+            'button:has-text("Enroll")',
+            'button:has-text("Register")',
+            'button:has-text("Complete")',
+            'button:has-text("Submit")',
+            'button:has-text("Continue")',
+        ]:
+            try:
+                btn = await page.query_selector(sel)
+                if btn:
+                    await btn.click()
+                    break
+            except Exception:
+                continue
 
-        # ── Check for CAPTCHA after submit ───────────────────────────────────
+        print("[registrar] Final submit clicked, waiting for confirmation...", flush=True)
+        await page.wait_for_timeout(6000)
+
         if await _captcha_present(page):
-            raise CaptchaRequiredError(
-                "CAPTCHA appeared after form submission. "
-                "Manual intervention or a CAPTCHA-solving service is required."
-            )
+            raise CaptchaRequiredError("CAPTCHA detected after final submit.")
 
         # ── Extract Aeroplan number ──────────────────────────────────────────
-        print("[registrar] Looking for Aeroplan number in confirmation")
         page_text = await page.inner_text("body")
-        # Aeroplan numbers are 9-digit numeric strings
         matches = re.findall(r"\b(\d{9})\b", page_text)
         aeroplan_number = matches[0] if matches else ""
 
         if not aeroplan_number:
-            # Try common confirmation selectors
             for sel in [
                 '[data-testid*="aeroplan"]',
                 '[class*="memberNumber"]',
                 '[id*="memberNumber"]',
+                '[class*="member-number"]',
             ]:
                 try:
                     el = await page.query_selector(sel)
@@ -224,13 +277,16 @@ async def register_account(client: dict) -> dict:
                 except Exception:
                     continue
 
+        print(f"[registrar] Final page URL: {page.url}", flush=True)
+        print(f"[registrar] Page snippet: {page_text[:300]}", flush=True)
+
         if not aeroplan_number:
             raise RuntimeError(
-                "Registration appeared to succeed but could not extract Aeroplan number. "
-                f"Page URL: {page.url}"
+                f"Registration may have succeeded but could not extract Aeroplan number. "
+                f"Page URL: {page.url}\nPage text: {page_text[:500]}"
             )
 
-        print(f"[registrar] Registered! Aeroplan number: {aeroplan_number}")
+        print(f"[registrar] ✅ Registered! Aeroplan number: {aeroplan_number}", flush=True)
         return {"aeroplan_number": aeroplan_number, "email": client["email"]}
 
     finally:
@@ -256,7 +312,6 @@ async def _captcha_present(page) -> bool:
         except Exception:
             continue
 
-    # Check page text for CAPTCHA-related phrases
     try:
         text = await page.inner_text("body")
         if any(phrase in text.lower() for phrase in ["verify you are human", "i'm not a robot", "captcha"]):
@@ -266,8 +321,6 @@ async def _captcha_present(page) -> bool:
 
     return False
 
-
-# ── Sync wrapper ──────────────────────────────────────────────────────────────
 
 def register_account_sync(client: dict) -> dict:
     """Synchronous wrapper around register_account()."""

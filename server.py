@@ -1040,161 +1040,116 @@ def handle_inbound_email(body: dict) -> tuple[dict, int]:
 
 # ── Full end-to-end booking handler ───────────────────────────────────────────
 
+def _ping_appa(booking_id: int, flight: dict, client: dict, deal: dict):
+    """Fire a hook to Appa to handle the actual booking via browser."""
+    import urllib.request
+    msg = (
+        f"BOOKING REQUEST #{booking_id}\n"
+        f"Passenger: {client.get('first_name')} {client.get('last_name')}\n"
+        f"DOB: {client.get('dob', 'N/A')}\n"
+        f"Passport: {client.get('passport_number', 'N/A')} ({client.get('nationality', 'N/A')})\n"
+        f"Email: {client.get('email', 'N/A')}\n"
+        f"Phone: {client.get('phone', 'N/A')}\n"
+        f"Flight: {flight.get('origin')}→{flight.get('destination')} on {flight.get('date')} ({flight.get('cabin')})\n"
+        f"Miles: {deal.get('miles', 0):,} + ${deal.get('taxes_usd', 0):.2f} taxes\n"
+        f"availability_id: {deal.get('availability_id', '')}\n"
+        f"\nPlease book this now using the Air Canada browser session."
+    )
+    payload = json.dumps({"text": msg, "mode": "now"}).encode()
+    req = urllib.request.Request(
+        "http://localhost:18789/hooks/wake",
+        data=payload,
+        headers={
+            "Authorization": "Bearer flightdash-hook-token-2026",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            print(f"[book-complete] Appa notified: {resp.status}", flush=True)
+    except Exception as e:
+        print(f"[book-complete] Failed to notify Appa: {e}", flush=True)
+
+
 def handle_book_complete(body: dict) -> tuple[dict, int]:
     """
     POST /api/book-complete
-    Orchestrates the full award booking flow:
-      1. Create client email
-      2. Register Aeroplan account
-      3. Search for best economy award via seats.aero
-      4. Calculate miles needed (award miles – 0 for new accounts)
-      5. Log in with Playwright
-      6. Buy miles
-      7. Book the flight
-    """
-    import datetime
 
+    Vault-based booking flow:
+      1. Search seats.aero for best award
+      2. Pick a vault with enough miles
+      3. Create a pending booking record
+      4. Ping Appa via webhook — Appa uses the live browser session to complete booking
+      5. Return booking_id so UI can poll /api/booking-status/<id>
+    """
     try:
-        from email_manager import create_client_email, wait_for_code, update_aeroplan_credentials
-        from aeroplan_registrar import register_account_sync, CaptchaRequiredError
-        from aeroplan_login import login_sync
-        from miles_buyer import buy_miles
+        from vault_manager import pick_vault, create_booking
     except ImportError as e:
         return {"error": f"Missing module: {e}", "step": "import"}, 500
 
     flight_req = body.get("flight", {})
     client_req = body.get("client", {})
-    payment    = body.get("payment", {})
 
-    if not flight_req or not client_req or not payment:
-        return {"error": "Missing required fields: flight, client, payment"}, 400
+    if not flight_req or not client_req:
+        return {"error": "Missing required fields: flight, client"}, 400
 
-    origin      = flight_req.get("origin", "")
-    destination = flight_req.get("destination", "")
-    date        = flight_req.get("date", "")
-    cabin       = flight_req.get("cabin", "economy").lower()
-    first_name  = client_req.get("first_name", "")
-    last_name   = client_req.get("last_name", "")
+    origin     = flight_req.get("origin", "")
+    destination= flight_req.get("destination", "")
+    date       = flight_req.get("date", "")
+    cabin      = flight_req.get("cabin", "economy").lower()
+    first_name = client_req.get("first_name", "")
+    last_name  = client_req.get("last_name", "")
 
     if not all([origin, destination, date, first_name, last_name]):
         return {"error": "Missing required fields in flight or client"}, 400
 
-    # ── Step 1: create client email ──────────────────────────────────────────
-    step = "create_email"
-    try:
-        client_email = create_client_email(first_name, last_name)
-        print(f"[book-complete] Step 1 OK — email: {client_email}")
-    except Exception as e:
-        return {"error": str(e), "step": step}, 500
-
-    # ── Step 2: register Aeroplan account ────────────────────────────────────
-    step = "register_aeroplan"
-    default_password = os.getenv("AEROPLAN_DEFAULT_PASSWORD", "SecurePass123!")
-    client_full = {
-        **client_req,
-        "email":    client_email,
-        "password": default_password,
-    }
-    try:
-        reg_result = register_account_sync(client_full)
-        aeroplan_number = reg_result["aeroplan_number"]
-        update_aeroplan_credentials(client_email, aeroplan_number, default_password)
-        print(f"[book-complete] Step 2 OK — Aeroplan #: {aeroplan_number}")
-    except CaptchaRequiredError as e:
-        return {"error": str(e), "step": step}, 503
-    except Exception as e:
-        return {"error": str(e), "step": step}, 500
-
-    # ── Step 3: search seats.aero for best economy award ────────────────────
+    # ── Step 1: search for best award ────────────────────────────────────────
     step = "search_award"
     try:
-        cabin_api_map = {
-            "economy": "economy", "premium": "premium",
-            "business": "business", "first": "first",
-        }
-        cabins_str = cabin_api_map.get(cabin, "economy")
-        rows = search_seats_aero([origin], [destination], date, date, cabins_str, ["aeroplan"])
-
-        # Score and find best deal
+        cabin_api_map = {"economy": "economy", "premium": "premium", "business": "business", "first": "first"}
+        rows = search_seats_aero([origin], [destination], date, date, cabin_api_map.get(cabin, "economy"), ["aeroplan"])
         best_deal = None
         for row in rows:
             d = score_row(row, cabin)
             if d:
                 best_deal = d
-                break  # search_seats_aero returns order_by=lowest_mileage
-
+                break
         if not best_deal:
-            return {"error": f"No award availability found for {origin}→{destination} on {date}", "step": step}, 404
-
+            return {"error": f"No award availability for {origin}→{destination} on {date}", "step": step}, 404
         miles_needed = best_deal["miles"]
         taxes_usd    = best_deal["taxes_usd"]
-        availability_id = best_deal["availability_id"]
-        print(f"[book-complete] Step 3 OK — best deal: {miles_needed:,} miles + ${taxes_usd} taxes")
+        print(f"[book-complete] Step 1 OK — {miles_needed:,} miles + ${taxes_usd} taxes")
     except Exception as e:
         return {"error": str(e), "step": step}, 500
 
-    # ── Step 4: calculate miles to purchase (new account has 0 balance) ──────
-    current_balance = 0
-    miles_to_buy    = max(0, miles_needed - current_balance)
+    # ── Step 2: pick vault ───────────────────────────────────────────────────
+    step = "pick_vault"
+    vault = pick_vault(miles_needed)
+    if not vault:
+        return {
+            "error": f"No vault with enough miles ({miles_needed:,} needed).",
+            "step": step,
+            "miles_needed": miles_needed,
+        }, 503
 
-    # ── Step 5: log in with Playwright ──────────────────────────────────────
-    step = "aeroplan_login"
-    try:
-        def _get_code():
-            return wait_for_code(client_email, timeout=120)
+    # ── Step 3: create pending booking ──────────────────────────────────────
+    booking_id = create_booking(
+        vault_id=vault["id"],
+        passenger_name=f"{first_name} {last_name}",
+        flight_ref=best_deal.get("availability_id", ""),
+        miles_used=miles_needed,
+        taxes_paid=taxes_usd,
+    )
+    print(f"[book-complete] Booking #{booking_id} created — notifying Appa")
 
-        browser, page = login_sync(client_email, default_password, _get_code)
-        print("[book-complete] Step 5 OK — logged in")
-    except Exception as e:
-        return {"error": str(e), "step": step}, 500
-
-    card = {
-        "number":    payment.get("card_number", ""),
-        "expiry_mm": payment.get("expiry_mm", ""),
-        "expiry_yy": payment.get("expiry_yy", ""),
-        "cvv":       payment.get("cvv", ""),
-        "name":      payment.get("name", f"{first_name} {last_name}"),
-    }
-
-    # ── Step 6: buy miles ────────────────────────────────────────────────────
-    step = "buy_miles"
-    cost_cad = 0.0
-    if miles_to_buy > 0:
-        try:
-            buy_result = asyncio.run(buy_miles(page, miles_to_buy, card))
-            cost_cad = buy_result.get("cost_cad", 0.0)
-            print(f"[book-complete] Step 6 OK — bought {buy_result['miles_bought']:,} miles for ${cost_cad} CAD")
-        except Exception as e:
-            try:
-                asyncio.run(browser.close())
-            except Exception:
-                pass
-            return {"error": str(e), "step": step}, 500
-
-    # ── Step 7: book the flight ──────────────────────────────────────────────
-    step = "book_flight"
-    try:
-        confirmation = asyncio.run(
-            _book_award_flight(page, best_deal, client_full, card)
-        )
-        print(f"[book-complete] Step 7 OK — confirmation: {confirmation}")
-    except Exception as e:
-        try:
-            asyncio.run(browser.close())
-        except Exception:
-            pass
-        return {"error": str(e), "step": step}, 500
-    finally:
-        try:
-            asyncio.run(browser.close())
-        except Exception:
-            pass
+    # ── Step 4: ping Appa to handle booking via browser ──────────────────────
+    _ping_appa(booking_id, flight_req, client_req, best_deal)
 
     return {
-        "status":          "booked",
-        "confirmation":    confirmation,
-        "aeroplan_number": aeroplan_number,
-        "email":           client_email,
+        "status":     "pending",
+        "booking_id": booking_id,
+        "message":    "Booking received — being processed now. Poll /api/booking-status/" + str(booking_id),
         "flight": {
             "origin":      origin,
             "destination": destination,
@@ -1203,9 +1158,23 @@ def handle_book_complete(body: dict) -> tuple[dict, int]:
             "miles":       miles_needed,
             "taxes_usd":   taxes_usd,
         },
-        "miles_purchased": miles_to_buy,
-        "cost_cad":        cost_cad,
-    }, 200
+    }, 202
+
+
+def handle_booking_status(booking_id: int) -> tuple[dict, int]:
+    """GET /api/booking-status/<id>"""
+    try:
+        from vault_manager import list_bookings
+        import sqlite3
+        from pathlib import Path
+        conn = sqlite3.connect(str(Path(__file__).parent / "vault.db"))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
+        if not row:
+            return {"error": "Booking not found"}, 404
+        return dict(row), 200
+    except Exception as e:
+        return {"error": str(e)}, 500
 
 
 async def _book_award_flight(page, deal: dict, client: dict, card: dict) -> str:
@@ -1481,6 +1450,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self.send_json({"status": "ok", "service": "flight-search-api", "version": "2.0"})
+        elif self.path == "/api/vault/list":
+            from vault_manager import list_vaults, vault_summary
+            self.send_json({"vaults": list_vaults(), "summary": vault_summary()})
+        elif self.path == "/api/vault/summary":
+            from vault_manager import vault_summary
+            self.send_json(vault_summary())
+        elif self.path.startswith("/api/booking-status/"):
+            try:
+                booking_id = int(self.path.split("/")[-1])
+                result, status = handle_booking_status(booking_id)
+                self.send_json(result, status)
+            except ValueError:
+                self.send_json({"error": "Invalid booking id"}, 400)
         elif self.path.startswith("/api/discover"):
             result, status = handle_discover()
             self.send_json(result, status)
@@ -1547,6 +1529,29 @@ class Handler(BaseHTTPRequestHandler):
             sig = self.headers.get("Stripe-Signature", "")
             result, status = handle_stripe_webhook(raw, sig)
             self.send_json(result, status)
+
+        elif self.path == "/api/vault/add":
+            try:
+                body = json.loads(raw)
+            except Exception:
+                self.send_json({"error": "Invalid JSON"}, 400)
+                return
+            from vault_manager import add_vault
+            vault_id = add_vault(
+                email=body["email"],
+                password=body["password"],
+                aeroplan_number=body["aeroplan_number"],
+                miles_balance=body.get("miles_balance", 0),
+            )
+            self.send_json({"status": "ok", "vault_id": vault_id})
+
+        elif self.path == "/api/vault/list":
+            from vault_manager import list_vaults, vault_summary
+            self.send_json({"vaults": list_vaults(), "summary": vault_summary()})
+
+        elif self.path == "/api/vault/summary":
+            from vault_manager import vault_summary
+            self.send_json(vault_summary())
 
         else:
             self.send_json({"error": "Not found"}, 404)
