@@ -883,7 +883,22 @@ def api_search():
         "first": "first", "any": "economy,premium,business,first",
     }
     cabins_str = cabin_api_map.get(cabin, "business")
-    rows       = search_seats_aero(origins, destinations, date_from, date_to, cabins_str, programs)
+
+    # Expand search ±3 days to find flexible-date bargains
+    FLEX_DAYS = 3
+    try:
+        from datetime import datetime as _dt, timedelta as _td
+        _d0 = _dt.strptime(date_from, "%Y-%m-%d").date()
+        flex_from = (_d0 - _td(days=FLEX_DAYS)).strftime("%Y-%m-%d")
+        flex_to   = (_d0 + _td(days=FLEX_DAYS)).strftime("%Y-%m-%d")
+        requested_dates = set()
+        for i in range(((_dt.strptime(date_to, "%Y-%m-%d").date()) - (_dt.strptime(date_from, "%Y-%m-%d").date())).days + 1):
+            requested_dates.add((_dt.strptime(date_from, "%Y-%m-%d").date() + _td(days=i)).strftime("%Y-%m-%d"))
+    except Exception:
+        flex_from, flex_to = date_from, date_to
+        requested_dates = {date_from}
+
+    rows = search_seats_aero(origins, destinations, flex_from, flex_to, cabins_str, programs)
 
     cabin_pref  = cabin if cabin != "any" else None
     cabin_lookup = {
@@ -921,6 +936,21 @@ def api_search():
             continue
         seen.add(key)
         deals.append(d)
+
+    # Separate original-date results from flexible-date results
+    original_deals = [d for d in deals if d["date"] in requested_dates]
+    flex_deals     = [d for d in deals if d["date"] not in requested_dates]
+
+    # Only include a flex-date deal if it's < 75% the cost of the cheapest original-date deal
+    if original_deals and flex_deals:
+        min_original_miles = min(d["miles"] for d in original_deals)
+        threshold = min_original_miles * 0.75
+        qualifying_flex = [d for d in flex_deals if d["miles"] < threshold]
+        for d in qualifying_flex:
+            d["alt_date"] = True
+        deals = original_deals + qualifying_flex
+    else:
+        deals = original_deals or flex_deals
 
     deals.sort(key=lambda x: (not x["direct"], x["arb_price_usd"]))
 
