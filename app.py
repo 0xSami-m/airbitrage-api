@@ -353,7 +353,7 @@ def prefetch_cash_prices(combos, max_workers=5):
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
     try:
         futures = [pool.submit(_fetch, args) for args in to_fetch]
-        concurrent.futures.wait(futures, timeout=20)
+        concurrent.futures.wait(futures, timeout=4)
     finally:
         pool.shutdown(wait=False)  # don't block — abandon any still-running GF threads
 
@@ -884,21 +884,28 @@ def api_search():
     }
     cabins_str = cabin_api_map.get(cabin, "business")
 
-    # Expand search ±3 days to find flexible-date bargains
+    # flex_only=true: search ±3 days and return only deals cheaper than min_miles threshold
+    flex_only      = body.get("flex_only", False)
+    min_miles_threshold = int(body.get("min_miles", 0) or 0)
+
     FLEX_DAYS = 3
     try:
         from datetime import datetime as _dt, timedelta as _td
         _d0 = _dt.strptime(date_from, "%Y-%m-%d").date()
-        flex_from = (_d0 - _td(days=FLEX_DAYS)).strftime("%Y-%m-%d")
-        flex_to   = (_d0 + _td(days=FLEX_DAYS)).strftime("%Y-%m-%d")
         requested_dates = set()
-        for i in range(((_dt.strptime(date_to, "%Y-%m-%d").date()) - (_dt.strptime(date_from, "%Y-%m-%d").date())).days + 1):
-            requested_dates.add((_dt.strptime(date_from, "%Y-%m-%d").date() + _td(days=i)).strftime("%Y-%m-%d"))
+        for i in range((_dt.strptime(date_to, "%Y-%m-%d").date() - _d0).days + 1):
+            requested_dates.add((_d0 + _td(days=i)).strftime("%Y-%m-%d"))
+        if flex_only:
+            search_from = (_d0 - _td(days=FLEX_DAYS)).strftime("%Y-%m-%d")
+            search_to   = (_d0 + _td(days=FLEX_DAYS)).strftime("%Y-%m-%d")
+        else:
+            search_from, search_to = date_from, date_to
     except Exception:
-        flex_from, flex_to = date_from, date_to
+        flex_only = False
         requested_dates = {date_from}
+        search_from, search_to = date_from, date_to
 
-    rows = search_seats_aero(origins, destinations, flex_from, flex_to, cabins_str, programs)
+    rows = search_seats_aero(origins, destinations, search_from, search_to, cabins_str, programs)
 
     cabin_pref  = cabin if cabin != "any" else None
     cabin_lookup = {
@@ -921,9 +928,9 @@ def api_search():
                             tuple(sorted(a.upper() for a in airline_codes)) if airline_codes else None,
                             is_direct))
 
-    combos_list = list(combos)[:40]
+    combos_list = list(combos)[:20]
     if combos_list:
-        print(f"[search] fetching {len(combos_list)} cash prices from Google Flights...")
+        print(f"[search] fetching {len(combos_list)} cash prices...")
         prefetch_cash_prices(combos_list)
 
     deals, seen = [], set()
@@ -937,20 +944,14 @@ def api_search():
         seen.add(key)
         deals.append(d)
 
-    # Separate original-date results from flexible-date results
-    original_deals = [d for d in deals if d["date"] in requested_dates]
-    flex_deals     = [d for d in deals if d["date"] not in requested_dates]
-
-    # Only include a flex-date deal if it's < 75% the cost of the cheapest original-date deal
-    if original_deals and flex_deals:
-        min_original_miles = min(d["miles"] for d in original_deals)
-        threshold = min_original_miles * 0.75
-        qualifying_flex = [d for d in flex_deals if d["miles"] < threshold]
-        for d in qualifying_flex:
+    if flex_only:
+        # Return only alt-date deals cheaper than the given threshold
+        if min_miles_threshold > 0:
+            deals = [d for d in deals if d["date"] not in requested_dates and d["miles"] < min_miles_threshold]
+        else:
+            deals = [d for d in deals if d["date"] not in requested_dates]
+        for d in deals:
             d["alt_date"] = True
-        deals = original_deals + qualifying_flex
-    else:
-        deals = original_deals or flex_deals
 
     deals.sort(key=lambda x: (not x["direct"], x["arb_price_usd"]))
 
