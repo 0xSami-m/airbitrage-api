@@ -350,11 +350,12 @@ def prefetch_cash_prices(combos, max_workers=5):
     def _fetch(args):
         fetch_cash_price(*args)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    try:
         futures = [pool.submit(_fetch, args) for args in to_fetch]
         concurrent.futures.wait(futures, timeout=20)
-        for f in futures:
-            f.cancel()
+    finally:
+        pool.shutdown(wait=False)  # don't block — abandon any still-running GF threads
 
 
 def google_flights_url_simple(origin, destination, date, cabin="business", direct=False):
