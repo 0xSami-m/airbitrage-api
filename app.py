@@ -1028,6 +1028,25 @@ def api_create_payment_intent():
     })
 
 
+@app.route("/api/notify-booking", methods=["POST", "OPTIONS"])
+def api_notify_booking():
+    if request.method == "OPTIONS":
+        return "", 204
+    data = request.get_json(force=True, silent=True) or {}
+    appa_url = os.getenv("APPA_TUNNEL_URL", "https://nevada-maternity-valium-gratuit.trycloudflare.com/hooks/wake")
+    appa_token = os.getenv("APPA_TOKEN", "flightdash-hook-token-2026")
+    try:
+        resp = _requests.post(
+            appa_url,
+            headers={"Authorization": f"Bearer {appa_token}", "Content-Type": "application/json"},
+            json={"text": data.get("text", str(data)), "mode": "now"},
+            timeout=10,
+        )
+        return jsonify({"status": "ok", "appa_status": resp.status_code})
+    except Exception as e:
+        return jsonify({"status": "error", "detail": str(e)}), 502
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8787))
