@@ -948,6 +948,51 @@ def api_search():
     })
 
 
+# ── Booking / payment intent ───────────────────────────────────────────────────
+@app.route("/api/create-payment-intent", methods=["POST", "OPTIONS"])
+def api_create_payment_intent():
+    if request.method == "OPTIONS":
+        return "", 204
+
+    import stripe
+    stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+
+    body = request.get_json(force=True, silent=True) or {}
+
+    miles         = int(body.get("miles", 0))
+    taxes_usd     = float(body.get("taxes_usd", 0))
+    cpp_usd       = float(os.getenv("MILES_CPP_USD", "0.0144"))
+    svc_fee_cents = int(os.getenv("SERVICE_FEE_CENTS", "3500"))
+
+    miles_cost_cents = int(miles * cpp_usd * 100)
+    taxes_cents      = int(taxes_usd * 100)
+    total_cents      = miles_cost_cents + taxes_cents + svc_fee_cents
+
+    intent = stripe.PaymentIntent.create(
+        amount=total_cents,
+        currency="usd",
+        metadata={
+            "origin":          body.get("origin", ""),
+            "destination":     body.get("destination", ""),
+            "date":            body.get("date", ""),
+            "cabin":           body.get("cabin", ""),
+            "availability_id": body.get("availability_id", ""),
+            "miles":           str(miles),
+            "taxes_usd":       str(taxes_usd),
+        },
+    )
+
+    return jsonify({
+        "client_secret": intent.client_secret,
+        "breakdown": {
+            "miles_cost_cents": miles_cost_cents,
+            "taxes_cents":      taxes_cents,
+            "service_fee_cents": svc_fee_cents,
+            "total_cents":      total_cents,
+        },
+    })
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8787))
