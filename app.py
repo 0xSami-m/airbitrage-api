@@ -10,7 +10,7 @@ Production: gunicorn app:app  (Procfile)
 import json
 import os
 import re
-import subprocess
+import requests as _requests
 import time
 import urllib.parse
 import concurrent.futures
@@ -377,16 +377,12 @@ def kayak_url(origin, destination, date, cabin="business", direct=False):
 
 # ── seats.aero helpers ─────────────────────────────────────────────────────────
 def curl_get(url):
-    result = subprocess.run(
-        ["curl", "-s", "--max-time", "30", url,
-         "-H", f"Partner-Authorization: {SEATS_AERO_KEY}",
-         "-H", "accept: application/json"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return None
     try:
-        return json.loads(result.stdout)
+        resp = _requests.get(url, headers={
+            "Partner-Authorization": SEATS_AERO_KEY,
+            "accept": "application/json",
+        }, timeout=30)
+        return resp.json()
     except Exception:
         return None
 
