@@ -1033,7 +1033,7 @@ def api_notify_booking():
     if request.method == "OPTIONS":
         return "", 204
     data = request.get_json(force=True, silent=True) or {}
-    appa_url = os.getenv("APPA_TUNNEL_URL", "https://nevada-maternity-valium-gratuit.trycloudflare.com/hooks/wake")
+    appa_url = os.getenv("APPA_HOOK_URL", os.getenv("APPA_TUNNEL_URL", "https://transmitted-plate-refers-dave.trycloudflare.com/hooks/wake"))
     appa_token = os.getenv("APPA_TOKEN", "flightdash-hook-token-2026")
     try:
         resp = _requests.post(
