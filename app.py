@@ -1753,25 +1753,115 @@ _CABIN_REVIEWS = {
     },
     ("aeroplan", "business"): {
         "url":     "https://upgradedpoints.com/travel/airlines/air-canada-business-class/",
-        "title":   "Air Canada Business Class Review [2025]",
-        "snippet": "Air Canada's Signature Class offers fully flat beds and excellent partner redemptions via Aeroplan.",
+        "title":   "Air Canada Aeroplan Business Class Review [2025]",
+        "snippet": "Aeroplan unlocks business class on Swiss, Lufthansa, United, and more — often at fixed rates that beat cash prices by 3-5x.",
+    },
+    ("aeroplan", "first"): {
+        "url":     "https://thepointsguy.com/guide/aeroplan-first-class-awards/",
+        "title":   "Aeroplan First Class Awards: The Ultimate Guide [2025]",
+        "snippet": "Aeroplan's fixed partner chart makes Lufthansa First and Swiss First some of the best-value first class redemptions in the world.",
     },
     ("alaska", "business"): {
         "url":     "https://upgradedpoints.com/travel/airlines/alaska-airlines-first-class/",
         "title":   "Alaska Airlines First Class Review [2025]",
-        "snippet": "Alaska First Class delivers solid domestic comfort with great Mileage Plan redemption value.",
+        "snippet": "Alaska First Class delivers solid domestic comfort with great Mileage Plan redemption value on partner carriers like British Airways and Finnair.",
     },
     ("american", "business"): {
         "url":     "https://upgradedpoints.com/travel/airlines/american-airlines-business-class/",
-        "title":   "American Airlines Business Class Review [2025]",
-        "snippet": "American's Flagship Business is a competitive international product with lie-flat seats and solid dining.",
+        "title":   "American Airlines Flagship Business Review [2025]",
+        "snippet": "American's Flagship Business is a competitive international product with lie-flat seats, solid dining, and access to Flagship Lounges.",
+    },
+    ("american", "first"): {
+        "url":     "https://thepointsguy.com/guide/american-airlines-first-class/",
+        "title":   "American Airlines First Class Review [2025]",
+        "snippet": "AAdvantage miles unlock Japan Airlines and Cathay Pacific First Class — some of the best hard products in the sky.",
     },
     ("flyingblue", "business"): {
         "url":     "https://upgradedpoints.com/travel/airlines/air-france-business-class/",
         "title":   "Air France Business Class Review [2025]",
-        "snippet": "Air France's Business cabin features the famous long chair seat and exceptional French cuisine.",
+        "snippet": "Air France's Business cabin features a reverse herringbone seat, exceptional French cuisine, and a dedicated lounge experience.",
     },
 }
+
+# Per-carrier reviews — used when we know the operating carrier (overrides program-level)
+_CARRIER_REVIEWS = {
+    ("LX", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/swiss-business-class/",
+        "title":   "SWISS Business Class Review [2025]",
+        "snippet": "SWISS Business Class (SWISS Excellence) features a direct-aisle flat bed, Swiss chocolate, and one of the most elegant hard products in Europe.",
+    },
+    ("LX", "first"): {
+        "url":     "https://thepointsguy.com/guide/swiss-first-class-review/",
+        "title":   "SWISS First Class Review [2025]",
+        "snippet": "SWISS First Class is one of the best first-class experiences bookable with Aeroplan miles — with a private suite and extraordinary service.",
+    },
+    ("LH", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/lufthansa-business-class/",
+        "title":   "Lufthansa Business Class Review [2025]",
+        "snippet": "Lufthansa Business Class offers a fully flat bed with direct aisle access and access to the excellent Lufthansa Business Lounges.",
+    },
+    ("LH", "first"): {
+        "url":     "https://thepointsguy.com/guide/lufthansa-first-class-review/",
+        "title":   "Lufthansa First Class Review [2025]",
+        "snippet": "Lufthansa First Class is a bucket-list experience: a private suite, Porsche transfers at FRA, and one of the world's best airport lounges.",
+    },
+    ("NH", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/ana-business-class/",
+        "title":   "ANA Business Class Review [2025]",
+        "snippet": "ANA Business Class (The Room) offers a private enclosed suite and is widely considered the best business class product in the world.",
+    },
+    ("NH", "first"): {
+        "url":     "https://thepointsguy.com/guide/ana-first-class-review/",
+        "title":   "ANA First Class Review [2025]",
+        "snippet": "ANA First Class is legendary — a private suite with Japanese hospitality, bookable with Virgin Atlantic miles for incredible value.",
+    },
+    ("SQ", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/singapore-airlines-business-class/",
+        "title":   "Singapore Airlines Business Class Review [2025]",
+        "snippet": "Singapore Airlines Business Class features a fully flat bed with direct aisle access and world-class service.",
+    },
+    ("SQ", "first"): {
+        "url":     "https://thepointsguy.com/guide/singapore-airlines-first-class-review/",
+        "title":   "Singapore Airlines Suites Review [2025]",
+        "snippet": "Singapore Suites are the most luxurious first class product in the world — a private double suite bookable with Aeroplan miles.",
+    },
+    ("JL", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/japan-airlines-business-class/",
+        "title":   "Japan Airlines Business Class Review [2025]",
+        "snippet": "JAL Business Class (JAL Sky Suite) offers a fully enclosed private suite and is bookable with American AAdvantage miles.",
+    },
+    ("JL", "first"): {
+        "url":     "https://thepointsguy.com/guide/japan-airlines-first-class-review/",
+        "title":   "Japan Airlines First Class Review [2025]",
+        "snippet": "JAL First Class is a standout product with a private suite and exceptional Japanese cuisine — one of the best AAdvantage sweet spots.",
+    },
+    ("BA", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/british-airways-business-class/",
+        "title":   "British Airways Club Suite Review [2025]",
+        "snippet": "British Airways Club Suite features a fully enclosed private suite with direct aisle access on long-haul routes.",
+    },
+    ("AC", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/air-canada-business-class/",
+        "title":   "Air Canada Signature Class Review [2025]",
+        "snippet": "Air Canada's Signature Class offers a fully flat bed with direct aisle access and one of the best complimentary meal services in North America.",
+    },
+    ("UA", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/united-airlines-polaris-business-class/",
+        "title":   "United Polaris Business Class Review [2025]",
+        "snippet": "United Polaris offers a fully flat bed with direct aisle access and is bookable with Aeroplan miles at competitive rates.",
+    },
+    ("VS", "premium"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/virgin-atlantic-premium-economy/",
+        "title":   "Is Virgin Atlantic Premium Economy Worth It? [2025]",
+        "snippet": "Virgin Atlantic's Premium Economy offers a wider seat, better meals, and priority boarding — a solid middle ground on transatlantic routes.",
+    },
+    ("VS", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/virgin-atlantic-upper-class/",
+        "title":   "Virgin Atlantic Upper Class Review [2025]",
+        "snippet": "Virgin Atlantic Upper Class features a fully flat bed, onboard bar, and one of the best business class products across the Atlantic.",
+    },
+}
+
 _DEFAULT_REVIEW = {
     "url":     "https://thepointsguy.com/guide/best-business-class-airlines/",
     "title":   "Best Business Class Airlines [2025]",
@@ -1808,11 +1898,23 @@ def _build_enrichment(flight: dict) -> dict:
     date        = flight.get("date", "")
     carriers    = flight.get("carriers", None)
 
+    # Resolve primary operating carrier (first in list)
+    carrier_code = None
+    if carriers:
+        codes = carriers if isinstance(carriers, list) else [carriers]
+        carrier_code = codes[0].upper() if codes else None
+
     flyai_ref = _generate_flyai_ref()
     kayak_url = _build_kayak_url(origin, destination, date, cabin, carriers)
-    review    = _CABIN_REVIEWS.get((program, cabin)) or \
-                _CABIN_REVIEWS.get((program, "business")) or \
-                _DEFAULT_REVIEW
+
+    # Review: carrier-specific first, then program-level, then default
+    review = (
+        (carrier_code and _CARRIER_REVIEWS.get((carrier_code, cabin))) or
+        (carrier_code and _CARRIER_REVIEWS.get((carrier_code, "business"))) or
+        _CABIN_REVIEWS.get((program, cabin)) or
+        _CABIN_REVIEWS.get((program, "business")) or
+        _DEFAULT_REVIEW
+    )
 
     return {
         "flyai_ref":  flyai_ref,
