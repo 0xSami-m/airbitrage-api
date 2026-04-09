@@ -1879,13 +1879,13 @@ def _build_kayak_url(origin, destination, date, cabin, carriers=None) -> str:
     cabin_map = {"economy": "e", "premium": "w", "business": "b", "first": "f"}
     c = cabin_map.get(cabin.lower(), "b")
     url = f"https://www.kayak.com/flights/{origin}-{destination}/{date}/1adults/{c}"
-    # Filter by airline if we have a single carrier
+    # Build filter string: cabin class + airline filter
+    filters = [f"cabin={c}"]
     if carriers:
         codes = carriers if isinstance(carriers, list) else [carriers]
-        if len(codes) == 1:
-            url += f"?fs=airlines={codes[0]}"
-        elif len(codes) > 1:
-            url += f"?fs=airlines={'~'.join(codes)}"
+        if codes:
+            filters.append(f"airlines={'~'.join(codes)}")
+    url += "?fs=" + ";".join(filters)
     return url
 
 
@@ -1902,11 +1902,17 @@ _CARRIER_NAMES = {
 }
 
 
-def _search_review(airline_name: str, cabin: str) -> dict:
+def _search_review(airline_name: str, cabin: str, aircraft: str = "") -> dict:
     """Search DuckDuckGo for a real-time cabin review. Falls back to default."""
     cabin_label = {"business": "Business Class", "first": "First Class",
                    "premium": "Premium Economy", "economy": "Economy"}.get(cabin, "Business Class")
-    query = f"{airline_name} {cabin_label} review 2025"
+    # Shorten aircraft name to just the model (e.g. "Airbus A350-1000" → "A350")
+    aircraft_str = ""
+    if aircraft:
+        import re
+        m = re.search(r"(A\d{3}|B\d{3}|777|787|747|737|767|757|330|340|350|380)", aircraft, re.IGNORECASE)
+        aircraft_str = f" {m.group(0)}" if m else ""
+    query = f"{airline_name} {cabin_label}{aircraft_str} review 2025"
     try:
         resp = _requests.get(
             "https://api.duckduckgo.com/",
@@ -1945,12 +1951,13 @@ def _search_review(airline_name: str, cabin: str) -> dict:
 
 def _build_enrichment(flight: dict) -> dict:
     """Build instant enrichment. Kayak URL + FlyAi ref are instant; review is a fast live search."""
-    cabin       = flight.get("cabin", "business").lower()
-    origin      = flight.get("origin", "")
-    destination = flight.get("destination", "")
-    date        = flight.get("date", "")
-    carriers    = flight.get("carriers", None)
+    cabin        = flight.get("cabin", "business").lower()
+    origin       = flight.get("origin", "")
+    destination  = flight.get("destination", "")
+    date         = flight.get("date", "")
+    carriers     = flight.get("carriers", None)
     program_name = flight.get("program_name", "")
+    aircraft     = flight.get("aircraft", "")  # e.g. "Airbus A350-1000"
 
     # Resolve primary operating carrier
     carrier_code = None
@@ -1968,7 +1975,7 @@ def _build_enrichment(flight: dict) -> dict:
 
     flyai_ref = _generate_flyai_ref()
     kayak_url = _build_kayak_url(origin, destination, date, cabin, carriers)
-    review    = _search_review(airline_name, cabin)
+    review    = _search_review(airline_name, cabin, aircraft)
 
     return {
         "flyai_ref":      flyai_ref,
