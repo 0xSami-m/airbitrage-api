@@ -2510,6 +2510,29 @@ def api_book_complete():
     }), 202
 
 
+@app.route("/api/bookings/pending", methods=["GET", "OPTIONS"])
+def api_bookings_pending():
+    """Return all bookings in 'processing' status created in the last 24h."""
+    if request.method == "OPTIONS":
+        return "", 204
+    import json as _json
+    conn = _get_db()
+    rows = conn.execute(
+        "SELECT * FROM bookings WHERE status='processing' "
+        "AND created_at >= datetime('now', '-24 hours') ORDER BY id DESC"
+    ).fetchall()
+    conn.close()
+    result = []
+    for row in rows:
+        d = dict(row)
+        try:
+            d["payload"] = _json.loads(d.get("airline_ref") or "{}")
+        except Exception:
+            d["payload"] = {}
+        result.append(d)
+    return jsonify({"bookings": result, "count": len(result)})
+
+
 @app.route("/api/booking-enrich", methods=["POST", "OPTIONS"])
 def api_booking_enrich():
     """Store enrichment data (FlyAi ref, Google Flights link, review) on a booking."""
