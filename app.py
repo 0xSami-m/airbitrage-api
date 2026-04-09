@@ -1612,7 +1612,8 @@ def api_booking_status(booking_id):
 import sqlite3 as _sqlite3
 from pathlib import Path as _Path
 
-_DB_PATH = str(_Path(__file__).parent / "vault.db")
+# Use persistent volume on Railway (/data), fall back to local for dev
+_DB_PATH = "/data/vault.db" if os.path.isdir("/data") else str(_Path(__file__).parent / "vault.db")
 
 def _get_db():
     conn = _sqlite3.connect(_DB_PATH, timeout=10)
