@@ -1809,36 +1809,41 @@ def _generate_flyai_ref() -> str:
     return "FLY-" + "".join(random.choices(chars, k=6))
 
 
-def _build_google_flights_url(origin, destination, date, cabin, flight_numbers="") -> str:
-    import urllib.parse
-    cabin_label = {"economy": "economy", "premium": "premium economy",
-                   "business": "business class", "first": "first class"}.get(cabin.lower(), "business class")
-    fn_str = f" {flight_numbers}" if flight_numbers else ""
-    query = f"one way {cabin_label} flight {origin} to {destination} {date}{fn_str}"
-    return f"https://www.google.com/travel/flights?q={urllib.parse.quote(query)}&curr=USD"
+def _build_kayak_url(origin, destination, date, cabin, carriers=None) -> str:
+    cabin_map = {"economy": "e", "premium": "w", "business": "b", "first": "f"}
+    c = cabin_map.get(cabin.lower(), "b")
+    url = f"https://www.kayak.com/flights/{origin}-{destination}/{date}/1adults/{c}"
+    # Filter by airline if we have a single carrier
+    if carriers:
+        codes = carriers if isinstance(carriers, list) else [carriers]
+        if len(codes) == 1:
+            url += f"?fs=airlines={codes[0]}"
+        elif len(codes) > 1:
+            url += f"?fs=airlines={'~'.join(codes)}"
+    return url
 
 
 def _build_enrichment(flight: dict) -> dict:
     """Build instant enrichment — all local, zero latency."""
-    program      = flight.get("program", "").lower()
-    cabin        = flight.get("cabin", "business").lower()
-    origin       = flight.get("origin", "")
-    destination  = flight.get("destination", "")
-    date         = flight.get("date", "")
-    flight_nums  = flight.get("flight_numbers", "")
+    program     = flight.get("program", "").lower()
+    cabin       = flight.get("cabin", "business").lower()
+    origin      = flight.get("origin", "")
+    destination = flight.get("destination", "")
+    date        = flight.get("date", "")
+    carriers    = flight.get("carriers", None)
 
-    flyai_ref    = _generate_flyai_ref()
-    gf_url       = _build_google_flights_url(origin, destination, date, cabin, flight_nums)
-    review       = _CABIN_REVIEWS.get((program, cabin)) or \
-                   _CABIN_REVIEWS.get((program, "business")) or \
-                   _DEFAULT_REVIEW
+    flyai_ref = _generate_flyai_ref()
+    kayak_url = _build_kayak_url(origin, destination, date, cabin, carriers)
+    review    = _CABIN_REVIEWS.get((program, cabin)) or \
+                _CABIN_REVIEWS.get((program, "business")) or \
+                _DEFAULT_REVIEW
 
     return {
-        "flyai_ref":          flyai_ref,
-        "google_flights_url": gf_url,
-        "review_url":         review["url"],
-        "review_title":       review["title"],
-        "review_snippet":     review["snippet"],
+        "flyai_ref":  flyai_ref,
+        "kayak_url":  kayak_url,
+        "review_url":     review["url"],
+        "review_title":   review["title"],
+        "review_snippet": review["snippet"],
     }
 
 
