@@ -30,23 +30,18 @@ BILLING = {
 
 # Map last-4 → card details for entry on VA checkout
 CARDS = {
-    "1004": {
-        "label":  "Sami's card",
-        "number": "4111111111111004",   # update with real card number
-        "expiry_month": "12",
-        "expiry_year":  "2027",
-        "cvv":    "123",
-        "name":   "Sami Muduroglu",
-    },
     "2002": {
         "label":  "amex platinum",
-        "number": "371449635392002",    # update with real card number
+        "number": "",        # card is saved on VA — no need to re-enter
         "expiry_month": "12",
-        "expiry_year":  "2027",
-        "cvv":    "1234",
+        "expiry_year":  "2030",
+        "cvv":    "7393",   # Amex Platinum CVV
         "name":   "Sami Muduroglu",
     },
 }
+
+# Set to True to stop just before clicking Pay (for test runs)
+DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 
 VA_EMAIL    = "samimuduroglu1@gmail.com"
 VA_PASSWORD = "Rthj9bdx"
@@ -950,6 +945,17 @@ async def book_virgin_atlantic(
         await page.wait_for_timeout(500)
 
         # ── Step 16: Click Pay / Confirm / Book now ────────────────────────────
+        if DRY_RUN:
+            print("[book_va] DRY RUN — stopping before Pay button. Screenshot saved.")
+            await page.screenshot(path="/tmp/va_dry_run_payment_page.png")
+            _notify_appa(
+                f"\U0001f9ea DRY RUN complete for booking #{booking_id}\n"
+                f"Route: {origin} \u2192 {dest} on {date}\n"
+                f"Got to payment page — stopped before Pay. Screenshot at /tmp/va_dry_run_payment_page.png"
+            )
+            _update_booking(booking_id, "dry_run")
+            return "DRY_RUN"
+
         print("[book_va] Clicking Pay/Book now")
         booked = False
         for attempt in range(3):
@@ -1061,8 +1067,12 @@ def main():
     parser.add_argument("--dob",        required=True, help="YYYY-MM-DD")
     parser.add_argument("--cabin",      default="business")
     parser.add_argument("--card",       default="2002", help="Last 4 of card")
-    parser.add_argument("--booking-id", default=None,  type=int)
+    parser.add_argument("--booking-id", default=None, type=int)
+    parser.add_argument("--dry-run",    action="store_true", help="Stop before Pay button")
     args = parser.parse_args()
+
+    if args.dry_run:
+        os.environ["DRY_RUN"] = "true"
 
     booking_id = args.booking_id
 

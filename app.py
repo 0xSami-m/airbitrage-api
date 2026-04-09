@@ -2436,6 +2436,8 @@ def api_book_complete():
     }
     script_file = script_map.get(program, "book_alaska.py")
     script = os.path.join(os.path.dirname(__file__), script_file)
+    # DRY_RUN env var: set to "true" to stop before Pay button (for testing)
+    dry_run = os.environ.get("DRY_RUN", "false")
     cmd = [
         sys.executable, script,
         "--origin",     origin,
@@ -2448,6 +2450,8 @@ def api_book_complete():
         "--card",       client.get("card_last4", "2002"),
         "--booking-id", str(booking_id),
     ]
+    if dry_run == "true" and script_file == "book_virgin_atlantic.py":
+        cmd.append("--dry-run")
     try:
         subprocess.Popen(cmd)
         print(f"[book-complete] Launched {script_file} for booking #{booking_id}", flush=True)
