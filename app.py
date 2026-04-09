@@ -1652,20 +1652,7 @@ def _init_users_table():
             created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Add new columns if they don't exist yet (safe migration)
-    for col, typedef in [("flyai_ref", "TEXT"), ("enrichment", "TEXT"),
-                         ("airline_ref", "TEXT")]:
-        try:
-            conn.execute(f"ALTER TABLE bookings ADD COLUMN {col} {typedef}")
-        except Exception:
-            pass
-    # Migrate aeroplan_ref → airline_ref if old column exists
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(bookings)").fetchall()]
-    if "aeroplan_ref" in cols and "airline_ref" not in cols:
-        conn.execute("ALTER TABLE bookings RENAME COLUMN aeroplan_ref TO airline_ref")
-    elif "aeroplan_ref" in cols and "airline_ref" in cols:
-        # Both exist — copy data and we'll use airline_ref going forward
-        conn.execute("UPDATE bookings SET airline_ref=aeroplan_ref WHERE airline_ref IS NULL")
+    # Create bookings table first (if it doesn't exist)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS bookings (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1681,6 +1668,23 @@ def _init_users_table():
             created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Safe column migrations
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(bookings)").fetchall()]
+    for col, typedef in [("flyai_ref", "TEXT"), ("enrichment", "TEXT"), ("airline_ref", "TEXT")]:
+        if col not in cols:
+            try:
+                conn.execute(f"ALTER TABLE bookings ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass
+    # Migrate aeroplan_ref → airline_ref if old column exists
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(bookings)").fetchall()]
+    if "aeroplan_ref" in cols and "airline_ref" in cols:
+        conn.execute("UPDATE bookings SET airline_ref=aeroplan_ref WHERE airline_ref IS NULL")
+    elif "aeroplan_ref" in cols:
+        try:
+            conn.execute("ALTER TABLE bookings RENAME COLUMN aeroplan_ref TO airline_ref")
+        except Exception:
+            pass
     conn.commit()
     conn.close()
 
