@@ -1636,6 +1636,27 @@ def _init_users_table():
             created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS bookings (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            vault_id       INTEGER,
+            passenger_name TEXT,
+            flight_ref     TEXT,
+            miles_used     INTEGER DEFAULT 0,
+            taxes_paid     REAL DEFAULT 0.0,
+            status         TEXT DEFAULT 'pending',
+            aeroplan_ref   TEXT,
+            flyai_ref      TEXT,
+            enrichment     TEXT,
+            created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    # Add new columns if they don't exist yet (safe migration)
+    for col, typedef in [("flyai_ref", "TEXT"), ("enrichment", "TEXT")]:
+        try:
+            conn.execute(f"ALTER TABLE bookings ADD COLUMN {col} {typedef}")
+        except Exception:
+            pass
     conn.commit()
     conn.close()
 
