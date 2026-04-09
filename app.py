@@ -1862,9 +1862,209 @@ _CARRIER_REVIEWS = {
     },
 }
 
+# Per-aircraft reviews — most specific, takes priority over carrier and program
+_AIRCRAFT_REVIEWS = {
+    # Airbus A350 family
+    ("A350", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/best-airlines-airbus-a350/",
+        "title":   "Best Business Class on the Airbus A350",
+        "snippet": "The A350 is the gold standard for long-haul business class comfort — ultra-quiet cabin, wider seats, and advanced air filtration on every airline that flies it.",
+    },
+    ("A350", "first"): {
+        "url":     "https://thepointsguy.com/guide/best-first-class-airbus-a350/",
+        "title":   "Best First Class on the Airbus A350",
+        "snippet": "First class suites on the A350 — from Lufthansa to Cathay Pacific — offer some of the most private and luxurious experiences at 40,000 feet.",
+    },
+    ("A350", "premium"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/best-premium-economy-a350/",
+        "title":   "Best Premium Economy on the Airbus A350",
+        "snippet": "Premium Economy on the A350 offers noticeably wider seats, more recline, and better meals than economy on the same aircraft.",
+    },
+    # Boeing 787 Dreamliner
+    ("787", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/best-business-class-boeing-787/",
+        "title":   "Best Business Class on the Boeing 787 Dreamliner",
+        "snippet": "The 787's large windows, lower cabin altitude, and high humidity make it the most comfortable long-haul aircraft for premium travelers.",
+    },
+    ("787", "first"): {
+        "url":     "https://thepointsguy.com/guide/best-first-class-boeing-787/",
+        "title":   "Best First Class on the Boeing 787",
+        "snippet": "ANA's The Suite and Japan Airlines' First Class on the 787 are bucket-list experiences bookable with points.",
+    },
+    ("787", "premium"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/best-premium-economy-787/",
+        "title":   "Best Premium Economy on the Boeing 787",
+        "snippet": "Premium Economy on the 787 Dreamliner combines the aircraft's superior comfort with upgraded seats and service.",
+    },
+    # Boeing 777
+    ("777", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/best-business-class-boeing-777/",
+        "title":   "Best Business Class on the Boeing 777",
+        "snippet": "The 777 is the workhorse of long-haul aviation — Emirates, Singapore, and Cathay offer exceptional business class products on this aircraft.",
+    },
+    ("777", "first"): {
+        "url":     "https://thepointsguy.com/guide/best-first-class-boeing-777/",
+        "title":   "Best First Class on the Boeing 777",
+        "snippet": "Emirates First Class and Singapore Suites on the 777 are among the most awarded premium cabin products ever created.",
+    },
+    # Airbus A380
+    ("A380", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/best-business-class-airbus-a380/",
+        "title":   "Best Business Class on the Airbus A380",
+        "snippet": "The A380's upper deck is reserved entirely for premium cabins on most airlines — Emirates, Singapore, and Qatar offer flagship products here.",
+    },
+    ("A380", "first"): {
+        "url":     "https://thepointsguy.com/guide/best-first-class-airbus-a380/",
+        "title":   "Best First Class on the Airbus A380",
+        "snippet": "Emirates First Class on the A380 — with its private suite and onboard bar — is widely considered the pinnacle of commercial aviation.",
+    },
+    # Airbus A330
+    ("A330", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/best-business-class-airbus-a330/",
+        "title":   "Best Business Class on the Airbus A330",
+        "snippet": "The A330 remains a popular long-haul workhorse — Air France, TAP, and Virgin Atlantic all run strong business class products on this aircraft.",
+    },
+    # Boeing 767
+    ("767", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/best-business-class-boeing-767/",
+        "title":   "Best Business Class on the Boeing 767",
+        "snippet": "Delta's 767 Polaris Business Class and United's 767 Polaris are popular transatlantic options bookable with Aeroplan miles.",
+    },
+    # Boeing 747
+    ("747", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/best-business-class-boeing-747/",
+        "title":   "Best Business Class on the Boeing 747",
+        "snippet": "The iconic 747's upper deck is coveted for its exclusivity — Lufthansa and Korean Air offer excellent business class up top.",
+    },
+    ("747", "first"): {
+        "url":     "https://thepointsguy.com/guide/lufthansa-747-first-class/",
+        "title":   "Best First Class on the Boeing 747",
+        "snippet": "Lufthansa First Class on the 747-8 is a bucket-list experience, and it's bookable with Aeroplan miles at fixed partner rates.",
+    },
+}
+
+# Add missing carriers to _CARRIER_REVIEWS (appended below)
+_CARRIER_REVIEWS.update({
+    ("EK", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/emirates-business-class/",
+        "title":   "Emirates Business Class Review",
+        "snippet": "Emirates Business Class features a fully flat seat, wide aisle, and access to the famous Emirates Lounge — one of the most consistent premium products globally.",
+    },
+    ("EK", "first"): {
+        "url":     "https://thepointsguy.com/guide/emirates-first-class-review/",
+        "title":   "Emirates First Class Review",
+        "snippet": "Emirates First Class is a private suite with a real shower at 40,000 feet — one of the most iconic products in aviation.",
+    },
+    ("QR", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/qatar-airways-qsuite-business-class/",
+        "title":   "Qatar Airways QSuite Business Class Review",
+        "snippet": "Qatar QSuite is widely voted the world's best business class — a fully enclosed private suite with a double bed option.",
+    },
+    ("QR", "first"): {
+        "url":     "https://thepointsguy.com/guide/qatar-airways-first-class/",
+        "title":   "Qatar Airways First Class Review",
+        "snippet": "Qatar First Class offers exceptional privacy and service on select routes, complementing the flagship QSuite product.",
+    },
+    ("CX", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/cathay-pacific-business-class/",
+        "title":   "Cathay Pacific Business Class Review",
+        "snippet": "Cathay Pacific Business Class (CX Studio) is a standout product with a full-flat bed, direct aisle access, and renowned Hong Kong hospitality.",
+    },
+    ("CX", "first"): {
+        "url":     "https://thepointsguy.com/guide/cathay-pacific-first-class-review/",
+        "title":   "Cathay Pacific First Class Review",
+        "snippet": "Cathay Pacific First Class is a spacious suite with exceptional dining and is bookable with American AAdvantage miles.",
+    },
+    ("AF", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/air-france-business-class/",
+        "title":   "Air France Business Class Review",
+        "snippet": "Air France Business (La Première on some routes) features the iconic long-chair seat, French cuisine, and a boutique in-flight experience.",
+    },
+    ("AF", "first"): {
+        "url":     "https://thepointsguy.com/guide/air-france-la-premiere-first-class/",
+        "title":   "Air France La Première First Class Review",
+        "snippet": "Air France La Première is one of the most exclusive first class products in the world, with private suites and Michelin-starred dining.",
+    },
+    ("KL", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/klm-business-class/",
+        "title":   "KLM Business Class Review",
+        "snippet": "KLM World Business Class offers a fully flat seat with direct aisle access and is bookable with Flying Blue miles.",
+    },
+    ("TK", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/turkish-airlines-business-class/",
+        "title":   "Turkish Airlines Business Class Review",
+        "snippet": "Turkish Airlines Business Class consistently wins awards for its in-flight catering and spacious flat-bed seats.",
+    },
+    ("EY", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/etihad-business-class/",
+        "title":   "Etihad Business Class Review",
+        "snippet": "Etihad Business Class (Business Studio) features a fully flat bed with direct aisle access and excellent Middle Eastern hospitality.",
+    },
+    ("EY", "first"): {
+        "url":     "https://thepointsguy.com/guide/etihad-first-class-review/",
+        "title":   "Etihad First Class Apartment Review",
+        "snippet": "Etihad First Class Apartments on the A380 are private rooms at altitude — one of the most spacious first class products ever built.",
+    },
+    ("AY", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/finnair-business-class/",
+        "title":   "Finnair Business Class Review",
+        "snippet": "Finnair Business Class offers a comfortable flat-bed seat with Nordic-inspired service, bookable with Alaska Mileage Plan miles.",
+    },
+    ("IB", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/iberia-business-class/",
+        "title":   "Iberia Business Class Review",
+        "snippet": "Iberia Business Class (Iberia Plus) offers a fully flat bed with direct aisle access and is one of the best values on transatlantic routes.",
+    },
+    ("OS", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/austrian-airlines-business-class/",
+        "title":   "Austrian Airlines Business Class Review",
+        "snippet": "Austrian Business Class offers Viennese charm with a fully flat bed and is bookable with Aeroplan miles on Star Alliance routes.",
+    },
+    ("SK", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/sas-business-class/",
+        "title":   "SAS Business Class Review",
+        "snippet": "SAS Business Class features a fully flat bed with direct aisle access and Scandinavian-inspired service.",
+    },
+    ("TP", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/tap-air-portugal-business-class/",
+        "title":   "TAP Air Portugal Business Class Review",
+        "snippet": "TAP Business Class offers a flat-bed seat and Portuguese hospitality on transatlantic routes, bookable with Miles&Go or partner miles.",
+    },
+    ("KE", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/korean-air-business-class/",
+        "title":   "Korean Air Business Class Review",
+        "snippet": "Korean Air Business Class (Prestige) features a fully flat seat and is bookable with Alaska Mileage Plan miles at competitive rates.",
+    },
+    ("OZ", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/asiana-airlines-business-class/",
+        "title":   "Asiana Airlines Business Class Review",
+        "snippet": "Asiana Business Class offers a flat-bed seat with excellent Korean cuisine and service on transpacific routes.",
+    },
+    ("DL", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/delta-one-business-class/",
+        "title":   "Delta One Business Class Review",
+        "snippet": "Delta One features a fully flat bed with direct aisle access and is one of the top US carrier international business class products.",
+    },
+    ("AA", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/american-airlines-business-class/",
+        "title":   "American Airlines Flagship Business Review",
+        "snippet": "American Flagship Business features a fully flat bed with direct aisle access and Flagship Lounge access at key hubs.",
+    },
+    ("WY", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/oman-air-business-class/",
+        "title":   "Oman Air Business Class Review",
+        "snippet": "Oman Air Business Class is a hidden gem — wide seats, excellent service, and a surprisingly premium experience on Middle East routes.",
+    },
+    ("CM", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/copa-airlines-business-class/",
+        "title":   "Copa Airlines Business Class Review",
+        "snippet": "Copa Business Class is a solid Latin American option with flat-bed seats on select widebody routes.",
+    },
+})
+
 _DEFAULT_REVIEW = {
     "url":     "https://thepointsguy.com/guide/best-business-class-airlines/",
-    "title":   "Best Business Class Airlines [2025]",
+    "title":   "Best Business Class Airlines",
     "snippet": "A guide to the world's top business class products and how to book them with points.",
 }
 
@@ -1889,74 +2089,14 @@ def _build_kayak_url(origin, destination, date, cabin, carriers=None) -> str:
     return url
 
 
-# Airline name lookup for review search queries
-_CARRIER_NAMES = {
-    "AC": "Air Canada", "LX": "SWISS", "LH": "Lufthansa", "UA": "United",
-    "AA": "American Airlines", "DL": "Delta", "AS": "Alaska Airlines",
-    "BA": "British Airways", "AF": "Air France", "KL": "KLM",
-    "VS": "Virgin Atlantic", "NH": "ANA", "JL": "Japan Airlines",
-    "SQ": "Singapore Airlines", "CX": "Cathay Pacific", "EK": "Emirates",
-    "EY": "Etihad", "QR": "Qatar Airways", "TK": "Turkish Airlines",
-    "OS": "Austrian", "SK": "SAS", "AY": "Finnair", "IB": "Iberia",
-    "TP": "TAP Air Portugal", "KE": "Korean Air", "OZ": "Asiana",
-}
-
-
-def _search_review(airline_name: str, cabin: str, aircraft: str = "") -> dict:
-    """Search DuckDuckGo for a real-time cabin review. Falls back to default."""
-    cabin_label = {"business": "Business Class", "first": "First Class",
-                   "premium": "Premium Economy", "economy": "Economy"}.get(cabin, "Business Class")
-    # Shorten aircraft name to just the model (e.g. "Airbus A350-1000" → "A350")
-    aircraft_str = ""
-    if aircraft:
-        import re
-        m = re.search(r"(A\d{3}|B\d{3}|777|787|747|737|767|757|330|340|350|380)", aircraft, re.IGNORECASE)
-        aircraft_str = f" {m.group(0)}" if m else ""
-    query = f"{airline_name} {cabin_label}{aircraft_str} review 2025"
-    try:
-        resp = _requests.get(
-            "https://api.duckduckgo.com/",
-            params={"q": query, "format": "json", "no_redirect": 1, "no_html": 1},
-            timeout=5,
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        data = resp.json()
-        # Try AbstractURL first (Wikipedia-style)
-        if data.get("AbstractURL") and data.get("AbstractText"):
-            return {
-                "url":     data["AbstractURL"],
-                "title":   data.get("Heading", f"{airline_name} {cabin_label}"),
-                "snippet": data["AbstractText"][:200],
-            }
-        # Try RelatedTopics
-        for topic in data.get("RelatedTopics", [])[:3]:
-            if isinstance(topic, dict) and topic.get("FirstURL") and topic.get("Text"):
-                return {
-                    "url":     topic["FirstURL"],
-                    "title":   f"{airline_name} {cabin_label} Review [2025]",
-                    "snippet": topic["Text"][:200],
-                }
-    except Exception as e:
-        print(f"[review-search] failed for {airline_name} {cabin_label}: {e}")
-
-    # Fallback: Google search link (user can click through)
-    import urllib.parse
-    search_url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
-    return {
-        "url":     search_url,
-        "title":   f"{airline_name} {cabin_label} Review [2025]",
-        "snippet": f"Click to read reviews of {airline_name} {cabin_label} from frequent flyers and travel experts.",
-    }
-
-
 def _build_enrichment(flight: dict) -> dict:
-    """Build instant enrichment. Kayak URL + FlyAi ref are instant; review is a fast live search."""
+    """Build instant enrichment — all local, zero latency."""
     cabin        = flight.get("cabin", "business").lower()
     origin       = flight.get("origin", "")
     destination  = flight.get("destination", "")
     date         = flight.get("date", "")
     carriers     = flight.get("carriers", None)
-    program_name = flight.get("program_name", "")
+    program      = flight.get("program", "").lower()
     aircraft     = flight.get("aircraft", "")  # e.g. "Airbus A350-1000"
 
     # Resolve primary operating carrier
@@ -1965,17 +2105,27 @@ def _build_enrichment(flight: dict) -> dict:
         codes = carriers if isinstance(carriers, list) else [carriers]
         carrier_code = codes[0].upper() if codes else None
 
-    # Airline name for review search
-    airline_name = (
-        _CARRIER_NAMES.get(carrier_code, "") or
-        program_name or
-        carrier_code or
-        "airline"
-    )
+    # Extract short aircraft model code ("Airbus A350-1000" → "A350")
+    aircraft_code = None
+    if aircraft:
+        import re as _re
+        m = _re.search(r"(A\d{3}|B\d{3}|777|787|747|737|767|757)", aircraft, _re.IGNORECASE)
+        if m:
+            aircraft_code = m.group(0).upper()
 
     flyai_ref = _generate_flyai_ref()
     kayak_url = _build_kayak_url(origin, destination, date, cabin, carriers)
-    review    = _search_review(airline_name, cabin, aircraft)
+
+    # Review priority: aircraft-specific > carrier-specific > program-level > default
+    review = (
+        (aircraft_code and _AIRCRAFT_REVIEWS.get((aircraft_code, cabin))) or
+        (aircraft_code and _AIRCRAFT_REVIEWS.get((aircraft_code, "business"))) or
+        (carrier_code  and _CARRIER_REVIEWS.get((carrier_code,  cabin))) or
+        (carrier_code  and _CARRIER_REVIEWS.get((carrier_code,  "business"))) or
+        _CABIN_REVIEWS.get((program, cabin)) or
+        _CABIN_REVIEWS.get((program, "business")) or
+        _DEFAULT_REVIEW
+    )
 
     return {
         "flyai_ref":      flyai_ref,
