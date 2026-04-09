@@ -1886,20 +1886,20 @@ def api_book_complete():
         return jsonify({"error": "Missing required fields in flight or client"}), 400
 
     # Generate enrichment instantly (all local, zero latency)
-    import json as _json
+    import json as _json, subprocess, sys
     enrichment = _build_enrichment(flight)
     flyai_ref  = enrichment["flyai_ref"]
 
-    # Store as pending_approval — Appa must approve before booking fires
+    # Store booking as processing
     conn = _get_db()
     conn.execute(
         "INSERT INTO bookings (vault_id, passenger_name, flight_ref, miles_used, taxes_paid, status) "
-        "VALUES (2, ?, ?, 0, 0.0, 'pending_approval')",
-        (f"{first_name} {last_name}", f"{origin}-{destination}-{date}"),
+        "VALUES (2, ?, ?, ?, ?, 'processing')",
+        (f"{first_name} {last_name}", f"{origin}-{destination}-{date}",
+         flight.get("miles", 0), flight.get("taxes_usd", 0.0)),
     )
     conn.commit()
     booking_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    # Stash full payload + enrichment for retrieval on approval/polling
     conn.execute(
         "UPDATE bookings SET airline_ref=?, flyai_ref=?, enrichment=? WHERE id=?",
         (_json.dumps({**data, "flight": flight, "client": client}),
@@ -1908,88 +1908,54 @@ def api_book_complete():
     conn.commit()
     conn.close()
 
-    # Notify Appa (non-blocking — runs after response is already formed)
+    # Launch booking agent immediately based on program
+    program = flight.get("program", "").lower()
+    script_map = {
+        "virginatlantic": "book_virgin_atlantic.py",
+        "alaska":         "book_alaska.py",
+        "aeroplan":       "book_alaska.py",  # fallback until AC script is ready
+        "american":       "book_alaska.py",  # fallback
+        "flyingblue":     "book_alaska.py",  # fallback
+    }
+    script_file = script_map.get(program, "book_alaska.py")
+    script = os.path.join(os.path.dirname(__file__), script_file)
+    cmd = [
+        sys.executable, script,
+        "--origin",     origin,
+        "--dest",       destination,
+        "--date",       date,
+        "--first",      first_name,
+        "--last",       last_name,
+        "--dob",        client.get("dob", ""),
+        "--cabin",      cabin,
+        "--card",       client.get("card_last4", "2002"),
+        "--booking-id", str(booking_id),
+    ]
+    try:
+        subprocess.Popen(cmd)
+        print(f"[book-complete] Launched {script_file} for booking #{booking_id}", flush=True)
+    except Exception as e:
+        print(f"[book-complete] Failed to launch {script_file}: {e}", flush=True)
+
+    # Notify Appa
     flight_nums = flight.get("flight_numbers", "")
     msg = (
-        f"\U0001f3ab BOOKING REQUEST #{booking_id} [{flyai_ref}]\n"
+        f"\U0001f3ab NEW BOOKING #{booking_id} [{flyai_ref}]\n"
         f"Route: {origin} \u2192 {destination}\n"
         f"Date: {date} | Cabin: {cabin.title()}{' | ' + flight_nums if flight_nums else ''}\n"
         f"Passenger: {first_name} {last_name}\n"
-        f"\nApprove or deny:\n"
-        f"  approve: POST https://api.airbitrage.io/api/booking-approve "
-        f'body={{"booking_id":{booking_id},"action":"approve","token":"{BOOKING_APPROVE_TOKEN}"}}\n'
-        f"  deny: same with action=deny"
+        f"Program: {flight.get('program_name', program)}\n"
+        f"Agent: {script_file} launched"
     )
     _appa_notify(msg)
 
     return jsonify({
-        "status":          "pending_approval",
-        "booking_id":      booking_id,
-        "flyai_ref":       flyai_ref,
-        "enrichment":      enrichment,
-        "message":         f"Booking #{booking_id} received — awaiting approval. Poll /api/booking-status/{booking_id}",
+        "status":     "processing",
+        "booking_id": booking_id,
+        "flyai_ref":  flyai_ref,
+        "enrichment": enrichment,
+        "message":    f"Booking #{booking_id} is being processed. Poll /api/booking-status/{booking_id}",
     }), 202
-
-
-@app.route("/api/booking-approve", methods=["POST", "OPTIONS"])
-def api_booking_approve():
-    """Approve or deny a pending booking. Token-gated."""
-    if request.method == "OPTIONS":
-        return "", 204
-
-    import json as _json, subprocess, sys
-    data       = request.get_json(force=True, silent=True) or {}
-    token      = data.get("token", "")
-    booking_id = data.get("booking_id")
-    action     = data.get("action", "").lower()
-
-    if token != BOOKING_APPROVE_TOKEN:
-        return jsonify({"error": "unauthorized"}), 403
-    if not booking_id or action not in ("approve", "deny"):
-        return jsonify({"error": "booking_id and action (approve|deny) required"}), 400
-
-    conn = _get_db()
-    row  = conn.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
-    if not row:
-        conn.close()
-        return jsonify({"error": "Booking not found"}), 404
-
-    stored = {}
-    try:
-        stored = _json.loads(row["airline_ref"] or "{}")
-    except Exception:
-        pass
-
-    if action == "deny":
-        conn.execute("UPDATE bookings SET status='denied' WHERE id=?", (booking_id,))
-        conn.commit()
-        conn.close()
-        _appa_notify(f"\u274c Booking #{booking_id} denied. No action taken.")
-        return jsonify({"ok": True, "status": "denied", "booking_id": booking_id})
-
-    # Approve — launch book_alaska.py
-    conn.execute("UPDATE bookings SET status='approved' WHERE id=?", (booking_id,))
-    conn.commit()
-    conn.close()
-
-    flight = stored.get("flight", {})
-    client = stored.get("client", {})
-    script = os.path.join(os.path.dirname(__file__), "book_alaska.py")
-    cmd = [
-        sys.executable, script,
-        "--origin",     flight.get("origin", ""),
-        "--dest",       flight.get("destination", ""),
-        "--date",       flight.get("date", ""),
-        "--first",      client.get("first_name", ""),
-        "--last",       client.get("last_name", ""),
-        "--dob",        client.get("dob", ""),
-        "--cabin",      flight.get("cabin", "business"),
-        "--card",       client.get("card_last4", "2002"),
-        "--booking-id", str(booking_id),
-    ]
-    subprocess.Popen(cmd)
-    _appa_notify(f"\u2705 Booking #{booking_id} approved \u2014 launching booking agent.")
-    return jsonify({"ok": True, "status": "approved", "booking_id": booking_id})
 
 
 @app.route("/api/booking-enrich", methods=["POST", "OPTIONS"])
