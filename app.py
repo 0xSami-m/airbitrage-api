@@ -1637,22 +1637,7 @@ def _init_users_table():
             created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS bookings (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-            vault_id       INTEGER,
-            passenger_name TEXT,
-            flight_ref     TEXT,
-            miles_used     INTEGER DEFAULT 0,
-            taxes_paid     REAL DEFAULT 0.0,
-            status         TEXT DEFAULT 'pending',
-            airline_ref   TEXT,
-            flyai_ref      TEXT,
-            enrichment     TEXT,
-            created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    # Create bookings table first (if it doesn't exist)
+    # Create bookings table
     conn.execute("""
         CREATE TABLE IF NOT EXISTS bookings (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1668,7 +1653,7 @@ def _init_users_table():
             created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Safe column migrations
+    # Safe column additions for older DBs
     cols = [r[1] for r in conn.execute("PRAGMA table_info(bookings)").fetchall()]
     for col, typedef in [("flyai_ref", "TEXT"), ("enrichment", "TEXT"), ("airline_ref", "TEXT")]:
         if col not in cols:
@@ -1676,15 +1661,6 @@ def _init_users_table():
                 conn.execute(f"ALTER TABLE bookings ADD COLUMN {col} {typedef}")
             except Exception:
                 pass
-    # Migrate aeroplan_ref → airline_ref if old column exists
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(bookings)").fetchall()]
-    if "aeroplan_ref" in cols and "airline_ref" in cols:
-        conn.execute("UPDATE bookings SET airline_ref=aeroplan_ref WHERE airline_ref IS NULL")
-    elif "aeroplan_ref" in cols:
-        try:
-            conn.execute("ALTER TABLE bookings RENAME COLUMN aeroplan_ref TO airline_ref")
-        except Exception:
-            pass
     conn.commit()
     conn.close()
 
