@@ -1862,6 +1862,234 @@ _CARRIER_REVIEWS = {
     },
 }
 
+# Per carrier+aircraft+cabin reviews — most specific
+# Key: (carrier_code, aircraft_code, cabin)
+_CARRIER_AIRCRAFT_REVIEWS = {
+    # SWISS
+    ("LX", "A330", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/swiss-business-class/",
+        "title":   "SWISS Business Class on the A330",
+        "snippet": "SWISS Business Class on the A330 features the SWISS Excellence seat — a direct-aisle flat bed with generous personal space and Swiss hospitality.",
+    },
+    ("LX", "A340", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/swiss-business-class/",
+        "title":   "SWISS Business Class on the A340",
+        "snippet": "SWISS Business Class on the A340 is a classic transatlantic product with a flat bed, Swiss cuisine, and access to SWISS First lounges at ZRH.",
+    },
+    ("LX", "A220", "business"): {
+        "url":     "https://thepointsguy.com/guide/swiss-business-class-a220/",
+        "title":   "SWISS Business Class on the A220",
+        "snippet": "The A220 is SWISS's short-haul workhorse — Business Class is more spacious than most narrow-body products with 2-2 seating.",
+    },
+    # Lufthansa
+    ("LH", "A350", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/lufthansa-business-class/",
+        "title":   "Lufthansa Business Class on the A350",
+        "snippet": "Lufthansa's new A350 Business Class features a fully flat bed in a 1-2-1 configuration with direct aisle access — one of the best in the Star Alliance.",
+    },
+    ("LH", "A350", "first"): {
+        "url":     "https://thepointsguy.com/guide/lufthansa-first-class-review/",
+        "title":   "Lufthansa First Class on the A350",
+        "snippet": "Lufthansa First Class on the A350 is a private suite with a closing door, caviar service, and the famous Lufthansa First Class Terminal in Frankfurt.",
+    },
+    ("LH", "747", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/lufthansa-business-class/",
+        "title":   "Lufthansa Business Class on the 747-8",
+        "snippet": "Lufthansa's 747-8 Business Class on the main deck offers a flat-bed seat with direct aisle access and is one of the most iconic ways to fly to FRA.",
+    },
+    ("LH", "747", "first"): {
+        "url":     "https://thepointsguy.com/guide/lufthansa-first-class-review/",
+        "title":   "Lufthansa First Class on the 747-8",
+        "snippet": "Lufthansa 747-8 First Class has 8 private suites on the upper deck — a bucket-list experience bookable with Aeroplan miles.",
+    },
+    ("LH", "A380", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/lufthansa-business-class/",
+        "title":   "Lufthansa Business Class on the A380",
+        "snippet": "Lufthansa's A380 Business Class runs on select long-haul routes with a flat-bed seat and access to the signature Lufthansa lounges.",
+    },
+    # ANA
+    ("NH", "A380", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/ana-business-class/",
+        "title":   "ANA Business Class on the A380 (Flying Honu)",
+        "snippet": "ANA's iconic Flying Honu A380 operates HNL routes with a unique all-economy upper deck and business class downstairs.",
+    },
+    ("NH", "787", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/ana-business-class/",
+        "title":   "ANA Business Class on the 787 (The Room)",
+        "snippet": "ANA The Room on the 787 is a fully enclosed private suite with a closing door — widely considered the world's best business class product.",
+    },
+    ("NH", "777", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/ana-business-class/",
+        "title":   "ANA Business Class on the 777",
+        "snippet": "ANA Business Class on the 777 features a staggered flat-bed seat with direct aisle access on long-haul transpacific routes.",
+    },
+    ("NH", "777", "first"): {
+        "url":     "https://thepointsguy.com/guide/ana-first-class-review/",
+        "title":   "ANA First Class on the 777",
+        "snippet": "ANA First Class on the 777 is one of the most exclusive products bookable with Virgin Atlantic miles — a private suite with unmatched Japanese hospitality.",
+    },
+    # Singapore Airlines
+    ("SQ", "A380", "first"): {
+        "url":     "https://thepointsguy.com/guide/singapore-airlines-suites-a380/",
+        "title":   "Singapore Airlines Suites on the A380",
+        "snippet": "Singapore Suites on the A380 are the most luxurious commercial aviation product ever made — a private double room bookable with Aeroplan miles.",
+    },
+    ("SQ", "A380", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/singapore-airlines-business-class/",
+        "title":   "Singapore Airlines Business Class on the A380",
+        "snippet": "Singapore Business Class on the A380 upper deck features a fully flat bed in a 1-2-1 layout with world-class service.",
+    },
+    ("SQ", "787", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/singapore-airlines-business-class/",
+        "title":   "Singapore Airlines Business Class on the 787",
+        "snippet": "Singapore Business Class on the 787 Dreamliner offers a flat-bed seat with direct aisle access on regional and long-haul routes.",
+    },
+    ("SQ", "777", "first"): {
+        "url":     "https://thepointsguy.com/guide/singapore-airlines-first-class-777/",
+        "title":   "Singapore Airlines First Class on the 777",
+        "snippet": "Singapore First Class on the 777 features a private suite with sliding door and is bookable with Aeroplan miles on select routes.",
+    },
+    # Japan Airlines
+    ("JL", "787", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/japan-airlines-business-class/",
+        "title":   "Japan Airlines Business Class on the 787 (JAL Sky Suite)",
+        "snippet": "JAL Sky Suite on the 787 is a fully enclosed private suite with a closing door — one of the best business class products bookable with AAdvantage miles.",
+    },
+    ("JL", "777", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/japan-airlines-business-class/",
+        "title":   "Japan Airlines Business Class on the 777",
+        "snippet": "JAL Business Class on the 777 features a flat-bed seat with direct aisle access and exceptional Japanese cuisine.",
+    },
+    ("JL", "777", "first"): {
+        "url":     "https://thepointsguy.com/guide/japan-airlines-first-class-review/",
+        "title":   "Japan Airlines First Class on the 777",
+        "snippet": "JAL First Class on the 777 is a private suite with exceptional Japanese food and service — one of the best AAdvantage sweet spots.",
+    },
+    # Emirates
+    ("EK", "A380", "first"): {
+        "url":     "https://thepointsguy.com/guide/emirates-first-class-a380/",
+        "title":   "Emirates First Class on the A380",
+        "snippet": "Emirates A380 First Class has a private suite with a real shower — the most iconic premium cabin experience in commercial aviation.",
+    },
+    ("EK", "A380", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/emirates-business-class-a380/",
+        "title":   "Emirates Business Class on the A380",
+        "snippet": "Emirates A380 Business Class features a flat-bed seat in a 1-2-1 layout with access to the famous onboard lounge and bar.",
+    },
+    ("EK", "777", "first"): {
+        "url":     "https://thepointsguy.com/guide/emirates-first-class-777/",
+        "title":   "Emirates First Class on the 777",
+        "snippet": "Emirates 777 First Class has an enclosed suite with a minibar and is available on routes where the A380 doesn't fly.",
+    },
+    ("EK", "777", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/emirates-business-class/",
+        "title":   "Emirates Business Class on the 777",
+        "snippet": "Emirates 777 Business Class features a flat-bed seat with direct aisle access and is bookable across the global Emirates network.",
+    },
+    # Qatar Airways
+    ("QR", "A350", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/qatar-airways-qsuite-business-class/",
+        "title":   "Qatar Airways QSuite on the A350",
+        "snippet": "Qatar QSuite on the A350 is the most awarded business class product in history — a private double suite with a closing door and double bed.",
+    },
+    ("QR", "787", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/qatar-airways-qsuite-business-class/",
+        "title":   "Qatar Airways QSuite on the 787",
+        "snippet": "Qatar QSuite is available on the 787 on select routes, delivering the same private suite experience as on the A350.",
+    },
+    ("QR", "A380", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/qatar-airways-qsuite-business-class/",
+        "title":   "Qatar Airways Business Class on the A380",
+        "snippet": "Qatar's A380 Business Class features flat-bed seats with direct aisle access on high-capacity long-haul routes.",
+    },
+    # Virgin Atlantic
+    ("VS", "A350", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/virgin-atlantic-upper-class/",
+        "title":   "Virgin Atlantic Upper Class on the A350",
+        "snippet": "Virgin Atlantic's new Upper Class suite on the A350 features a private door, direct aisle access, and one of the best onboard bars in the sky.",
+    },
+    ("VS", "A350", "premium"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/virgin-atlantic-premium-economy/",
+        "title":   "Virgin Atlantic Premium Economy on the A350",
+        "snippet": "Virgin Atlantic Premium on the A350 is one of the best premium economy products — wider seats, better meals, and a quieter cabin.",
+    },
+    ("VS", "787", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/virgin-atlantic-upper-class/",
+        "title":   "Virgin Atlantic Upper Class on the 787",
+        "snippet": "Virgin Atlantic Upper Class on the 787 Dreamliner features a flat-bed suite and signature onboard social space.",
+    },
+    # British Airways
+    ("BA", "A350", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/british-airways-club-suite/",
+        "title":   "British Airways Club Suite on the A350",
+        "snippet": "British Airways Club Suite on the A350 is BA's best business class product — a private enclosed suite with a closing door and direct aisle access.",
+    },
+    ("BA", "787", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/british-airways-club-suite/",
+        "title":   "British Airways Club Suite on the 787",
+        "snippet": "BA's 787 Club Suite offers a private enclosed suite with direct aisle access on long-haul routes from Heathrow.",
+    },
+    ("BA", "777", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/british-airways-business-class/",
+        "title":   "British Airways Club World on the 777",
+        "snippet": "BA Club World on the 777 features the older yin-yang flat-bed seat — functional but less private than the newer Club Suite.",
+    },
+    # Air Canada
+    ("AC", "787", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/air-canada-business-class/",
+        "title":   "Air Canada Signature Class on the 787",
+        "snippet": "Air Canada Signature Class on the 787 features a fully flat pod with direct aisle access and a top-rated complimentary bar service.",
+    },
+    ("AC", "777", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/air-canada-business-class/",
+        "title":   "Air Canada Signature Class on the 777",
+        "snippet": "Air Canada 777 Signature Class offers a flat-bed pod with direct aisle access on transcontinental and transatlantic routes.",
+    },
+    # United Airlines
+    ("UA", "787", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/united-airlines-polaris-business-class/",
+        "title":   "United Polaris on the 787",
+        "snippet": "United Polaris on the 787 Dreamliner features a fully flat seat with direct aisle access and is bookable with Aeroplan miles.",
+    },
+    ("UA", "777", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/united-airlines-polaris-business-class/",
+        "title":   "United Polaris on the 777",
+        "snippet": "United Polaris on the 777 is a fully flat seat with direct aisle access, available on long-haul transatlantic and transpacific routes.",
+    },
+    ("UA", "767", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/united-airlines-polaris-business-class/",
+        "title":   "United Polaris on the 767",
+        "snippet": "United Polaris on the 767 is a popular transatlantic option with a flat-bed seat, bookable with Aeroplan miles.",
+    },
+    # Cathay Pacific
+    ("CX", "A350", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/cathay-pacific-business-class/",
+        "title":   "Cathay Pacific Business Class on the A350 (CX Studio)",
+        "snippet": "Cathay CX Studio on the A350 is a stunning private suite with a closing door — one of the best new business class products in the world.",
+    },
+    ("CX", "777", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/cathay-pacific-business-class/",
+        "title":   "Cathay Pacific Business Class on the 777",
+        "snippet": "Cathay's 777 Business Class features a fully flat bed with direct aisle access and excellent Hong Kong hospitality.",
+    },
+    ("CX", "777", "first"): {
+        "url":     "https://thepointsguy.com/guide/cathay-pacific-first-class-777/",
+        "title":   "Cathay Pacific First Class on the 777",
+        "snippet": "Cathay First Class on the 777 is a spacious suite with a closing door and exceptional dining — bookable with AAdvantage miles.",
+    },
+    # Air France
+    ("AF", "A350", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/air-france-business-class/",
+        "title":   "Air France Business Class on the A350",
+        "snippet": "Air France's new Business Class on the A350 features a private suite with closing door — one of the most anticipated new products in aviation.",
+    },
+    ("AF", "777", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/air-france-business-class/",
+        "title":   "Air France Business Class on the 777",
+        "snippet": "Air France Business on the 777 features the iconic long-chair flat bed with French cuisine and access to the Air France Lounge.",
+    },
+}
+
 # Per-aircraft reviews — most specific, takes priority over carrier and program
 _AIRCRAFT_REVIEWS = {
     # Airbus A350 family
@@ -2116,12 +2344,14 @@ def _build_enrichment(flight: dict) -> dict:
     flyai_ref = _generate_flyai_ref()
     kayak_url = _build_kayak_url(origin, destination, date, cabin, carriers)
 
-    # Review priority: aircraft-specific > carrier-specific > program-level > default
+    # Review priority: carrier+aircraft+cabin > carrier+cabin > aircraft+cabin > program+cabin > default
     review = (
+        (carrier_code and aircraft_code and _CARRIER_AIRCRAFT_REVIEWS.get((carrier_code, aircraft_code, cabin))) or
+        (carrier_code and aircraft_code and _CARRIER_AIRCRAFT_REVIEWS.get((carrier_code, aircraft_code, "business"))) or
+        (carrier_code  and _CARRIER_REVIEWS.get((carrier_code, cabin))) or
+        (carrier_code  and _CARRIER_REVIEWS.get((carrier_code, "business"))) or
         (aircraft_code and _AIRCRAFT_REVIEWS.get((aircraft_code, cabin))) or
         (aircraft_code and _AIRCRAFT_REVIEWS.get((aircraft_code, "business"))) or
-        (carrier_code  and _CARRIER_REVIEWS.get((carrier_code,  cabin))) or
-        (carrier_code  and _CARRIER_REVIEWS.get((carrier_code,  "business"))) or
         _CABIN_REVIEWS.get((program, cabin)) or
         _CABIN_REVIEWS.get((program, "business")) or
         _DEFAULT_REVIEW
