@@ -21,7 +21,7 @@ from fast_flights import FlightData, Passengers, get_flights as gf_get_flights
 
 app = Flask(__name__)
 
-SEATS_AERO_KEY = "pro_34HzjB9LzH46xVzkZz0HeJWekiv"
+SEATS_AERO_KEY = os.environ.get("SEATS_AERO_KEY", "pro_3C3BUt7QiVMzBPN3fwxfU7UCqYc")
 BASE_URL        = "https://seats.aero/partnerapi/search"
 TRIPS_URL       = "https://seats.aero/partnerapi/trips"
 
@@ -379,6 +379,74 @@ def kayak_url(origin, destination, date, cabin="business", direct=False):
     return base
 
 
+# ── seats.aero call counter ───────────────────────────────────────────────────
+import fcntl
+
+_COUNTER_FILE  = os.environ.get("SEATS_COUNTER_FILE", "/tmp/seats_aero_counter.json")
+_COUNTER_ALERT = int(os.environ.get("SEATS_COUNTER_ALERT", 200))  # notify at this many calls
+_APPA_HOOK_URL = os.environ.get("APPA_HOOK_URL", "https://hooks.airbitrage.io/hooks/wake")
+_APPA_TOKEN    = os.environ.get("APPA_TOKEN", "flightdash-hook-token-2026")
+
+def _increment_call_counter():
+    """Increment the seats.aero call counter (file-based, safe across gunicorn workers).
+    Sends a notification when the daily count crosses SEATS_COUNTER_ALERT."""
+    import datetime
+    today = datetime.date.today().isoformat()
+    try:
+        with open(_COUNTER_FILE, "a+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            f.seek(0)
+            raw = f.read()
+            try:
+                data = json.loads(raw) if raw.strip() else {}
+            except Exception:
+                data = {}
+            # Reset counter if it's a new day
+            if data.get("date") != today:
+                data = {"date": today, "count": 0, "alerted": False}
+            data["count"] += 1
+            count    = data["count"]
+            alerted  = data.get("alerted", False)
+            # Write back
+            f.seek(0)
+            f.truncate()
+            f.write(json.dumps(data))
+            fcntl.flock(f, fcntl.LOCK_UN)
+        # Send alert (outside lock) if threshold just crossed
+        if count >= _COUNTER_ALERT and not alerted:
+            _mark_alerted_and_notify(today, count)
+    except Exception as e:
+        print(f"[counter] error: {e}")
+
+def _mark_alerted_and_notify(today, count):
+    """Mark alerted=True in the counter file and send a notification to Appa."""
+    try:
+        with open(_COUNTER_FILE, "r+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            raw = f.read()
+            try:
+                data = json.loads(raw) if raw.strip() else {}
+            except Exception:
+                data = {}
+            if not data.get("alerted"):
+                data["alerted"] = True
+                f.seek(0); f.truncate()
+                f.write(json.dumps(data))
+            fcntl.flock(f, fcntl.LOCK_UN)
+        # Notify Appa
+        msg = (f"⚠️ seats.aero API alert: {count} calls made today ({today}). "
+               f"Approaching daily rate limit — check usage at airbitrage.io.")
+        _requests.post(
+            _APPA_HOOK_URL,
+            headers={"Authorization": f"Bearer {_APPA_TOKEN}", "Content-Type": "application/json"},
+            json={"text": msg, "mode": "now"},
+            timeout=5,
+        )
+        print(f"[counter] alert sent: {count} calls today")
+    except Exception as e:
+        print(f"[counter] alert error: {e}")
+
+
 # ── seats.aero helpers ─────────────────────────────────────────────────────────
 def curl_get(url):
     try:
@@ -386,8 +454,21 @@ def curl_get(url):
             "Partner-Authorization": SEATS_AERO_KEY,
             "accept": "application/json",
         }, timeout=30)
+        _increment_call_counter()
+        # Log every seats.aero call for audit
+        import urllib.parse as _up
+        parsed = _up.urlparse(url)
+        qs     = _up.parse_qs(parsed.query)
+        origin = qs.get("origin_airport", [""])[0]
+        dest   = qs.get("destination_airport", [""])[0]
+        start  = qs.get("start_date", [""])[0]
+        end    = qs.get("end_date", [""])[0]
+        cabins = qs.get("cabins", [""])[0]
+        sources= qs.get("sources", [""])[0]
+        print(f"[seats.aero] {parsed.path} origin={origin} dest={dest} {start}-{end} cabins={cabins} sources={sources} status={resp.status_code}")
         return resp.json()
-    except Exception:
+    except Exception as e:
+        print(f"[seats.aero] ERROR: {e} url={url[:100]}")
         return None
 
 
@@ -454,11 +535,14 @@ def taxes_to_usd(raw, currency):
     return (raw / 100) * TAX_FX.get(currency, 1.0)
 
 
+ALLOWED_PROGRAMS = {"aeroplan", "alaska", "american", "virginatlantic", "flyingblue"}
+
 def search_seats_aero(origins, destinations, date_from, date_to, cabins, programs):
     origin_str  = ",".join(origins) if isinstance(origins, list) else origins
     dest_str    = ",".join(destinations) if isinstance(destinations, list) else destinations
     cabin_str   = ",".join(cabins) if isinstance(cabins, list) else cabins
-    sources_str = ",".join(programs) if programs else ",".join(BUY_MILES_INFO.keys())
+    effective   = [p for p in programs if p in ALLOWED_PROGRAMS] if programs else list(ALLOWED_PROGRAMS)
+    sources_str = ",".join(effective)
 
     url = (
         f"{BASE_URL}"
@@ -479,7 +563,8 @@ def score_row(row, cabin_pref):
     source     = row.get("Source", "")
     info       = BUY_MILES_INFO.get(source, {})
     rate       = info.get("standard_cpp_usd", 2.0)
-    promo_rate = info.get("promo_cpp_usd", rate * 0.65)
+    # Single source of truth for displayed price — always use CURRENT_PROMO_CPP
+    promo_rate = CURRENT_PROMO_CPP.get(source, info.get("promo_cpp_usd", rate * 0.65))
     route      = row.get("Route", {})
     currency   = row.get("TaxesCurrency", "USD")
     distance   = route.get("Distance", 0)
@@ -499,11 +584,12 @@ def score_row(row, cabin_pref):
         if miles <= 0:
             continue
 
-        taxes_usd  = taxes_to_usd(row.get(f"{prefix}TotalTaxesRaw", 0), currency)
-        buy_usd    = (miles * rate) / 100
-        buy_promo  = (miles * promo_rate) / 100
-        total_usd  = buy_usd + taxes_usd
-        total_promo = buy_promo + taxes_usd
+        taxes_usd   = taxes_to_usd(row.get(f"{prefix}TotalTaxesRaw", 0), currency)
+        buy_usd     = (miles * rate) / 100
+        buy_promo   = (miles * promo_rate) / 100
+        svc_mult    = PROGRAM_SERVICE_FEE.get(source, 1.0)
+        total_usd   = (buy_usd + taxes_usd) * svc_mult
+        total_promo = (buy_promo + taxes_usd) * svc_mult
 
         orig_code     = route.get("OriginAirport", "")
         dest_code     = route.get("DestinationAirport", "")
@@ -608,17 +694,42 @@ REGION_MAP = {
     "MEX": "Latin Am.", "LIM": "Latin Am.", "SCL": "Latin Am.",
 }
 
-CURRENT_PROMO_CPP = {
-    "aeroplan":       1.44,
-    "alaska":         1.98,
-    "american":       2.26,
-    "virginatlantic": 1.47,
-    "delta":          2.50,
-    "flyingblue":     2.00,
-    "united":         2.00,
-    "singapore":      1.80,
-    "etihad":         1.80,
-    "lufthansa":      1.70,
+def _load_cpp_from_vault():
+    import sqlite3, os
+    defaults = {
+        "aeroplan":       1.49,
+        "alaska":         1.88125,
+        "virginatlantic": 1.18,
+        "american":       2.26,
+        "flyingblue":     1.69,
+        "delta":          2.50,
+        "united":         2.00,
+        "singapore":      1.80,
+        "etihad":         1.80,
+        "lufthansa":      1.70,
+    }
+    try:
+        db = os.path.join(os.path.dirname(__file__), "vault.db")
+        conn = sqlite3.connect(db)
+        rows = conn.execute("SELECT program, cost_per_point_cents FROM vault_accounts WHERE status='active'").fetchall()
+        conn.close()
+        for program, cpp in rows:
+            if program and cpp:
+                defaults[program] = float(cpp)
+    except Exception as e:
+        print(f"[cpp] Could not load vault CPP: {e}")
+    return defaults
+
+CURRENT_PROMO_CPP = _load_cpp_from_vault()
+
+# Per-program service fee multiplier (applied on top of miles cost + taxes)
+# 1.0 = no fee, 1.20 = 20% surcharge
+PROGRAM_SERVICE_FEE = {
+    "flyingblue":     1.20,
+    "american":       1.20,
+    "aeroplan":       1.20,
+    "alaska":         1.20,
+    "virginatlantic": 1.20,
 }
 
 DISCOVER_SEARCHES = [
@@ -646,8 +757,296 @@ PINNED_SEARCHES = [
     ("SIN", "LHR", "aeroplan", "business",        None),
 ]
 
+# ── Manual search results ─────────────────────────────────────────────────────
+# Hardcoded results for routes where the Partner API doesn't surface live-only
+# availability. Injected into /api/search responses when origin+destination match.
+# taxes_usd: convert from currency at time of entry (€515 ≈ $556 at 1.08)
+# expires: drop after this date
+MANUAL_SEARCH_RESULTS = [
+    {
+        "origin":              "DXB",
+        "destination":         "JFK",
+        "program":             "flyingblue",
+        "program_name":        "Air France/KLM Flying Blue",
+        "cabin":               "business",
+        "miles":               90000,
+        "taxes_usd":           593,   # confirmed $593.23 on seats.aero Jun 9 2026
+        "direct":              False,
+        "stops":               1,
+        "airlines":            "AF",
+        "carriers":            "AF",
+        "carrier_logos":       {"AF": CARRIER_LOGOS.get("AF", "")},
+        "date":                 "2026-06-09",
+        "_date_from":           "2026-06-05",  # valid window start
+        "_date_to":             "2026-06-11",  # valid window end
+        "departs_at":          "2026-06-09T00:40:00Z",  # AF655 DXB dep 00:40 local
+        "arrives_at":          "2026-06-09T10:40:00Z",  # AF2 JFK arr 10:40 AM local
+        "flight_numbers":      "AF655, AF2",
+        "segments": [
+            {"flight_number": "AF655", "airline_code": "AF",
+             "airline_logo": CARRIER_LOGOS.get("AF", ""),
+             "origin": "DXB", "destination": "CDG",
+             "departs_at": "2026-06-09T00:40:00Z", "arrives_at": "2026-06-09T08:10:00Z",
+             "duration_min": 450},
+            {"flight_number": "AF2", "airline_code": "AF",
+             "airline_logo": CARRIER_LOGOS.get("AF", ""),
+             "origin": "CDG", "destination": "JFK",
+             "departs_at": "2026-06-09T10:40:00Z", "arrives_at": "2026-06-09T18:40:00Z",
+             "duration_min": 480},
+        ],
+        "_cash_price_usd":     2429,
+        "note":                "Via CDG — verify availability on seats.aero before booking",
+        "_manual":             True,
+        "_expires":            "2026-07-01",
+        "_cabins":             ["business"],
+        "_cpp":                1.69,
+        "_service_fee_pct":    0.20,
+    },
+    {
+        "origin":              "DXB",
+        "destination":         "EWR",
+        "program":             "flyingblue",
+        "program_name":        "Air France/KLM Flying Blue",
+        "cabin":               "business",
+        "miles":               90000,
+        "taxes_usd":           593,   # confirmed $593.23 on seats.aero Jun 9 2026
+        "direct":              False,
+        "stops":               1,
+        "airlines":            "AF",
+        "carriers":            "AF",
+        "carrier_logos":       {"AF": CARRIER_LOGOS.get("AF", "")},
+        "date":                 "2026-06-09",
+        "_date_from":           "2026-06-05",
+        "_date_to":             "2026-06-11",
+        "departs_at":          "2026-06-09T00:40:00Z",
+        "arrives_at":          "2026-06-09T14:45:00Z",  # AF62 EWR arr 14:45 EDT
+        "flight_numbers":      "AF655, AF62",
+        "segments": [
+            {"flight_number": "AF655", "airline_code": "AF",
+             "airline_logo": CARRIER_LOGOS.get("AF", ""),
+             "origin": "DXB", "destination": "CDG",
+             "departs_at": "2026-06-09T00:40:00Z", "arrives_at": "2026-06-09T08:10:00Z",
+             "duration_min": 450},
+            {"flight_number": "AF62", "airline_code": "AF",
+             "airline_logo": CARRIER_LOGOS.get("AF", ""),
+             "origin": "CDG", "destination": "EWR",
+             "departs_at": "2026-06-09T10:15:00Z", "arrives_at": "2026-06-09T18:45:00Z",
+             "duration_min": 510},
+        ],
+        "note":                "Via CDG — verify availability on seats.aero before booking",
+        "_manual":             True,
+        "_expires":            "2026-07-01",
+        "_cash_price_usd":     3057,
+        "_cabins":             ["business"],
+        "_cpp":                1.69,
+        "_service_fee_pct":    0.20,
+    },
+    {
+        "origin":              "BCN",
+        "destination":         "MNL",
+        "program":             "aeroplan",
+        "program_name":        "Air Canada Aeroplan",
+        "cabin":               "mixed",  # BCN->ICN business (C), ICN->MNL economy (Y)
+        "miles":               110000,
+        "taxes_usd":           58,    # CA$83 x 0.694
+        "direct":              False,
+        "stops":               1,
+        "airlines":            "OZ",
+        "carriers":            "OZ",
+        "carrier_logos":       {"OZ": CARRIER_LOGOS.get("OZ", "")},
+        "date":                "2026-04-28",
+        "_date_from":          "2026-04-28",
+        "_date_to":            "2026-04-28",
+        "departs_at":          "2026-04-28T20:50:00Z",  # BCN dep 20:50 local
+        "arrives_at":          "2026-04-29T22:35:00Z",  # MNL arr 22:35 local next day
+        "flight_numbers":      "OZ541, OZ701",
+        "segments": [
+            {"flight_number": "OZ541", "airline_code": "OZ",
+             "airline_logo": CARRIER_LOGOS.get("OZ", ""),
+             "origin": "BCN", "destination": "ICN",
+             "departs_at": "2026-04-28T20:50:00Z", "arrives_at": "2026-04-29T15:40:00Z",
+             "duration_min": 720, "aircraft_name": "Airbus A350-900", "fare_class": "J"},
+            {"flight_number": "OZ701", "airline_code": "OZ",
+             "airline_logo": CARRIER_LOGOS.get("OZ", ""),
+             "origin": "ICN", "destination": "MNL",
+             "departs_at": "2026-04-29T18:35:00Z", "arrives_at": "2026-04-29T22:35:00Z",
+             "duration_min": 240, "aircraft_name": "Airbus A321", "fare_class": "Y"},
+        ],
+        "remaining_seats":     3,
+        "_cash_price_usd":     3920,  # BCN->ICN OZ biz ($3,648) + ICN->MNL OZ eco ($272)
+        "note":                "Via ICN — verify on aircanada.com before booking",
+        "_manual":             True,
+        "_expires":            "2026-04-29",
+        "_cabins":             ["business", "mixed"],  # show for business searches
+        "_service_fee_pct":    0.20,
+    },
+]
+
+
+def _get_manual_results(origins, destinations, cabin, date_from, date_to):
+    """Return manual search results matching the given query."""
+    import datetime
+    today_str = datetime.date.today().isoformat()
+    results = []
+    orig_set = set(o.upper() for o in (origins if isinstance(origins, list) else [origins]))
+    dest_set = set(d.upper() for d in (destinations if isinstance(destinations, list) else [destinations]))
+    for r in MANUAL_SEARCH_RESULTS:
+        if r.get("_expires", "9999") < today_str:
+            continue
+        if r["origin"] not in orig_set or r["destination"] not in dest_set:
+            continue
+        allowed_cabins = r.get("_cabins", ["business", "first"])
+        if cabin and cabin != "any" and cabin not in allowed_cabins:
+            continue
+        # Only show if the queried date range overlaps the result's valid window
+        r_date_from = r.get("_date_from", r.get("date", date_from))
+        r_date_to   = r.get("_date_to",   r.get("date", date_to))
+        if date_to < r_date_from or date_from > r_date_to:
+            continue
+        cpp          = r.get("_cpp") or CURRENT_PROMO_CPP.get(r["program"], 2.0)
+        svc_fee_pct  = r.get("_service_fee_pct", 0.0)
+        miles = r["miles"]
+        taxes = r["taxes_usd"]
+        info  = BUY_MILES_INFO.get(r["program"], {})
+        buy_promo    = round(miles * cpp / 100, 2)
+        subtotal     = round(buy_promo + taxes, 2)
+        total        = round(subtotal * (1 + svc_fee_pct), 2)
+        result = {
+            "availability_id":          "",
+            "date":                     r.get("date", date_from),
+            "origin":                   r["origin"],
+            "destination":              r["destination"],
+            "program":                  r["program"],
+            "program_name":             r["program_name"],
+            "cabin":                    r["cabin"],
+            "miles":                    miles,
+            "taxes_usd":                taxes,
+            "arb_miles_cost_promo_usd": buy_promo,
+            "arb_price_promo_usd":      total,
+            "arb_miles_cost_usd":       round(miles * info.get("standard_cpp_usd", cpp) / 100, 2),
+            "arb_price_usd":            round(miles * info.get("standard_cpp_usd", cpp) / 100 + taxes, 2),
+            "cash_price_usd":           None,
+            "cash_price_source":        "unavailable",
+            "savings_usd":              None,
+            "value_ratio":              None,
+            "direct":                   r["direct"],
+            "airlines":                 r["airlines"],
+            "carrier_logos":            r["carrier_logos"],
+            "program_logo_url":         info.get("logo_url", ""),
+            "buy_miles_info":           {
+                "program_name":        info.get("program_name", r["program_name"]),
+                "logo_url":            info.get("logo_url", ""),
+                "buy_url":             info.get("buy_url", ""),
+                "standard_cpp_usd":    info.get("standard_cpp_usd", cpp),
+                "promo_cpp_usd":       cpp,
+                "cost_at_promo":       buy_promo,
+                "total_at_promo":      total,
+            },
+            "google_flights_url":       google_flights_url_simple(r["origin"], r["destination"], date_from, r["cabin"], False),
+            "kayak_url":               kayak_url(r["origin"], r["destination"], date_from, r["cabin"], False),
+            "note":                     r.get("note", ""),
+            "stops":                    r.get("stops", 1),
+            "carriers":                 r.get("carriers", ""),
+            "flight_numbers":           r.get("flight_numbers", ""),
+            "segments":                 r.get("segments", []),
+            "departs_at":               r.get("departs_at"),
+            "arrives_at":               r.get("arrives_at"),
+            "remaining_seats":          r.get("remaining_seats", 0),
+            "aircraft_name":            r.get("aircraft_name", ""),
+            "cash_price_usd":           r.get("_cash_price_usd"),
+            "cash_price_source":        "manual" if r.get("_cash_price_usd") else "unavailable",
+            "savings_usd":              round(r["_cash_price_usd"] - total, 0) if r.get("_cash_price_usd") else None,
+            "value_ratio":              round(r["_cash_price_usd"] / total, 2) if r.get("_cash_price_usd") else None,
+            "_manual":                  True,
+        }
+        results.append(result)
+    return results
+
+
 _discover_cache = {"tiles": [], "ts": 0.0}
-DISCOVER_TTL = 3600  # 1 hour
+# Discover tiles are rebuilt once daily via POST /api/discover/refresh (cron).
+# TTL is a fallback safety net only — not the primary refresh trigger.
+DISCOVER_TTL          = int(os.environ.get("DISCOVER_TTL_SECONDS", 86400))  # 24h default
+DISCOVER_CACHE_FILE   = os.environ.get("DISCOVER_CACHE_FILE", "/tmp/discover_cache.json")
+DISCOVER_REFRESH_TOKEN = os.environ.get("DISCOVER_REFRESH_TOKEN", "discover-refresh-token-2026")
+
+def _load_discover_cache_from_disk():
+    """Load persisted discover cache on startup. Ignore if > 24h old."""
+    try:
+        with open(DISCOVER_CACHE_FILE, "r") as f:
+            saved = json.load(f)
+        age = time.time() - saved.get("ts", 0)
+        if age < 86400 and saved.get("tiles"):
+            _discover_cache["tiles"] = saved["tiles"]
+            _discover_cache["ts"]    = saved["ts"]
+            print(f"[discover] loaded {len(saved['tiles'])} tiles from disk cache (age {int(age/60)}m)")
+    except Exception:
+        pass  # no cache yet, fine
+
+def _save_discover_cache_to_disk(tiles):
+    """Persist discover cache to disk so restarts don't burn API quota."""
+    try:
+        with open(DISCOVER_CACHE_FILE, "w") as f:
+            json.dump({"tiles": tiles, "ts": time.time()}, f)
+        print(f"[discover] saved {len(tiles)} tiles to disk cache")
+    except Exception as e:
+        print(f"[discover] warning: could not save cache to disk: {e}")
+
+_load_discover_cache_from_disk()
+
+DISCOVER_ENABLED = os.environ.get("DISCOVER_ENABLED", "false").lower() == "true"
+
+def _maybe_startup_refresh():
+    """On startup, if cache is empty:
+    - If disk cache is less than 6 hours old, just load from disk (skip API calls).
+    - Otherwise one worker does a synchronous refresh; others wait.
+    This prevents deploys from burning seats.aero quota."""
+    if not DISCOVER_ENABLED:
+        return
+    if _discover_cache["tiles"]:
+        return
+    # Check disk cache age before hitting the API
+    try:
+        with open(DISCOVER_CACHE_FILE, "r") as f:
+            saved = json.load(f)
+        age = time.time() - saved.get("ts", 0)
+        if age < 6 * 3600 and saved.get("tiles"):  # less than 6h old — use disk, skip API
+            _discover_cache["tiles"] = saved["tiles"]
+            _discover_cache["ts"]    = saved["ts"]
+            print(f"[discover] startup: loaded {len(saved['tiles'])} tiles from disk (age {int(age/60)}m), skipping API refresh")
+            return
+    except Exception:
+        pass  # no cache file, proceed to refresh
+    lock_file = "/tmp/discover_refresh.lock"
+    done_file = "/tmp/discover_refresh.done"
+    # If done_file exists, another worker already finished — just load from disk.
+    if os.path.exists(done_file):
+        _load_discover_cache_from_disk()
+        return
+    try:
+        fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        # We won the lock — do a synchronous refresh
+        print("[discover] no cache on startup — running synchronous refresh")
+        tiles = build_discover_tiles()
+        _discover_cache["tiles"] = tiles
+        _discover_cache["ts"]    = time.time()
+        _save_discover_cache_to_disk(tiles)
+        # Signal other workers that we're done
+        open(done_file, "w").close()
+        try:
+            os.remove(lock_file)
+        except Exception:
+            pass
+    except FileExistsError:
+        # Another worker is refreshing — wait for it then load from disk
+        print("[discover] waiting for another worker to finish refresh...")
+        for _ in range(60):  # wait up to 60s
+            time.sleep(2)
+            if os.path.exists(done_file):
+                _load_discover_cache_from_disk()
+                return
+        print("[discover] gave up waiting, starting up without cache")
 
 
 def build_discover_tiles():
@@ -712,7 +1111,8 @@ def build_discover_tiles():
 
             taxes_usd     = taxes_to_usd(row.get(f"{prefix}TotalTaxesRaw", 0), currency)
             buy_promo     = (miles * promo_cpp) / 100
-            total         = buy_promo + taxes_usd
+            svc_mult      = PROGRAM_SERVICE_FEE.get(source, 1.0)
+            total         = (buy_promo + taxes_usd) * svc_mult
             orig          = route.get("OriginAirport", "?")
             dest          = route.get("DestinationAirport", "?")
             date          = row.get("Date", "")
@@ -772,9 +1172,27 @@ def build_discover_tiles():
         t["cash_price_source"] = "google_flights" if cash_price else "unavailable"
         t["_ratio"]            = t["value_ratio"] or 0
 
-    pinned   = sorted([c for c in candidates if c.get("_pinned")],      key=lambda x: x["_ratio"], reverse=True)
-    unpinned = sorted([c for c in candidates if not c.get("_pinned")],  key=lambda x: x["_ratio"], reverse=True)
-    sorted_tiles = pinned + unpinned[:max(0, 20 - len(pinned))]
+    # Filter: drop tiles where ratio < 1.2 (not worth it vs buying a cash ticket)
+    # Exception: keep pinned routes and tiles with no cash price (can't judge them)
+    MIN_RATIO = 1.2
+    def _keep(c):
+        if c.get("_pinned"):
+            return True
+        ratio = c.get("_ratio", 0)
+        if ratio == 0:  # no cash price — keep, but sort to back
+            return True
+        return ratio >= MIN_RATIO
+
+    candidates = [c for c in candidates if _keep(c)]
+
+    # Sort: tiles with cash prices (sortable by ratio) first, then no-cash tiles by miles cost
+    pinned_with_cash    = sorted([c for c in candidates if c.get("_pinned") and c["_ratio"] > 0],     key=lambda x: x["_ratio"], reverse=True)
+    pinned_no_cash      = sorted([c for c in candidates if c.get("_pinned") and c["_ratio"] == 0],    key=lambda x: x["arb_price_promo_usd"])
+    unpinned_with_cash  = sorted([c for c in candidates if not c.get("_pinned") and c["_ratio"] > 0], key=lambda x: x["_ratio"], reverse=True)
+    unpinned_no_cash    = sorted([c for c in candidates if not c.get("_pinned") and c["_ratio"] == 0], key=lambda x: x["arb_price_promo_usd"])
+
+    ordered = pinned_with_cash + unpinned_with_cash + pinned_no_cash + unpinned_no_cash
+    sorted_tiles = ordered[:20]
 
     for t in sorted_tiles:
         t.pop("_ratio", None)
@@ -831,20 +1249,84 @@ def add_cors(response):
     return response
 
 
+# On startup, populate cache synchronously so all workers have tiles from the first request.
+_maybe_startup_refresh()
+
+
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "service": "flight-search-api", "version": "2.0"})
 
 
+@app.route("/api/seats-usage")
+def api_seats_usage():
+    """Returns today's seats.aero API call count."""
+    import datetime
+    today = datetime.date.today().isoformat()
+    try:
+        with open(_COUNTER_FILE, "r") as f:
+            data = json.load(f)
+        if data.get("date") != today:
+            data = {"date": today, "count": 0, "alerted": False}
+    except Exception:
+        data = {"date": today, "count": 0, "alerted": False}
+    data["alert_threshold"] = _COUNTER_ALERT
+    return jsonify(data)
+
+
 @app.route("/api/discover")
 def api_discover():
+    if not DISCOVER_ENABLED:
+        # Read-only mode: serve cached tiles if available, no rebuilds
+        _load_discover_cache_from_disk()
+        return jsonify({"tiles": _discover_cache.get("tiles", []), "disabled": True})
     now = time.time()
     if _discover_cache["tiles"] and (now - _discover_cache["ts"]) < DISCOVER_TTL:
         return jsonify({"tiles": _discover_cache["tiles"]})
+    # In-memory empty — try disk (another worker may have refreshed).
+    _load_discover_cache_from_disk()
+    if _discover_cache["tiles"]:
+        return jsonify({"tiles": _discover_cache["tiles"]})
+    print("[discover] no cache available (use /api/discover/refresh to populate)")
+    return jsonify({"tiles": []})
+
+
+@app.route("/api/discover/patch-cache", methods=["POST", "OPTIONS"])
+def api_discover_patch_cache():
+    """Directly write a tiles array to the discover cache. No seats.aero calls."""
+    if request.method == "OPTIONS":
+        return "", 204
+    body  = request.get_json(force=True, silent=True) or {}
+    token = body.get("token") or request.args.get("token", "")
+    if token != DISCOVER_REFRESH_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    tiles = body.get("tiles")
+    if not isinstance(tiles, list):
+        return jsonify({"error": "tiles array required"}), 400
+    _discover_cache["tiles"] = tiles
+    _discover_cache["ts"]    = time.time()
+    _save_discover_cache_to_disk(tiles)
+    print(f"[discover] cache patched with {len(tiles)} tiles")
+    return jsonify({"ok": True, "tiles": len(tiles)})
+
+
+@app.route("/api/discover/refresh", methods=["POST", "OPTIONS"])
+def api_discover_refresh():
+    """Force a full discover rebuild. Called by daily 6am cron. Requires token auth."""
+    if request.method == "OPTIONS":
+        return "", 204
+    if not DISCOVER_ENABLED:
+        return jsonify({"error": "discover is disabled"}), 503
+    body  = request.get_json(force=True, silent=True) or {}
+    token = body.get("token") or request.args.get("token", "")
+    if token != DISCOVER_REFRESH_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    print("[discover] refresh triggered by cron")
     tiles = build_discover_tiles()
     _discover_cache["tiles"] = tiles
-    _discover_cache["ts"]    = now
-    return jsonify({"tiles": tiles})
+    _discover_cache["ts"]    = time.time()
+    _save_discover_cache_to_disk(tiles)
+    return jsonify({"ok": True, "tiles": len(tiles)})
 
 
 @app.route("/api/trips/<availability_id>")
@@ -955,6 +1437,51 @@ def api_search():
 
     deals.sort(key=lambda x: (not x["direct"], x["arb_price_usd"]))
 
+    # Enrich top results with trip details (departs_at, arrives_at, segments, flight_numbers)
+    def _enrich_result(t):
+        avail_id = t.get("availability_id", "")
+        if not avail_id:
+            return
+        try:
+            all_trips = fetch_trips(avail_id)
+            if not all_trips:
+                return
+            tile_airlines = set(a.upper() for a in (t.get("airlines") or []))
+            is_direct = t.get("direct", False)
+            matched = [tr for tr in all_trips
+                       if tile_airlines and
+                       any(c.strip().upper() in tile_airlines for c in tr.get("carriers", "").split(","))]
+            if not matched:
+                matched = all_trips
+            pool = [tr for tr in matched if tr["stops"] == 0] if is_direct else matched
+            if not pool:
+                pool = matched
+            best = sorted(pool, key=lambda x: (x["stops"], x["total_duration_min"]))[0]
+            segs = best.get("segments", [])
+            main_seg = segs[-1] if len(segs) > 1 else (segs[0] if segs else None)
+            t["departs_at"]    = best.get("departs_at") or None
+            t["arrives_at"]    = best.get("arrives_at") or None
+            t["stops"]         = best.get("stops", t.get("stops", 0))
+            t["carriers"]      = best.get("carriers", "")
+            t["flight_numbers"] = best.get("flight_numbers", "")
+            t["segments"]      = segs
+            t["aircraft_name"] = main_seg.get("aircraft_name") if main_seg else None
+        except Exception as e:
+            print(f"[search] enrich error for {avail_id}: {e}")
+
+    # Inject manual results (live-only availability not in Partner API cache)
+    manual = _get_manual_results(origins, destinations, cabin, date_from, date_to)
+    # Only add if not already covered by an API result for same origin+dest+program+cabin
+    existing_keys = {(d["origin"], d["destination"], d["program"], d["cabin"]) for d in deals}
+    for m in manual:
+        key = (m["origin"], m["destination"], m["program"], m["cabin"])
+        if key not in existing_keys:
+            deals.append(m)
+
+    top = deals[:50]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(_enrich_result, top))
+
     summary = None
     if deals:
         b = deals[0]
@@ -1033,18 +1560,314 @@ def api_notify_booking():
     if request.method == "OPTIONS":
         return "", 204
     data = request.get_json(force=True, silent=True) or {}
-    appa_url = os.getenv("APPA_HOOK_URL", os.getenv("APPA_TUNNEL_URL", "https://transmitted-plate-refers-dave.trycloudflare.com/hooks/wake"))
+    appa_url = os.getenv("APPA_HOOK_URL", "https://hooks.airbitrage.io/hooks/wake")
     appa_token = os.getenv("APPA_TOKEN", "flightdash-hook-token-2026")
+
+    # Build wake message — include full booking payload so Appa can auto-book
+    msg = data.get("text", "")
+    if not msg and all(k in data for k in ("first_name", "last_name", "origin", "destination", "date")):
+        msg = (
+            f"[BOOKING] {data['first_name']} {data['last_name']} · "
+            f"DOB: {data.get('dob','?')} · "
+            f"{data['origin']}\u2192{data['destination']} {data['date']} ({data.get('cabin','business')}) · "
+            f"card: {data.get('card_last4','2002')} · "
+            f"filling out {data['origin']}\u2192{data['destination']} {data['date']} ({data.get('cabin','business')})"
+        )
+
     try:
         resp = _requests.post(
             appa_url,
             headers={"Authorization": f"Bearer {appa_token}", "Content-Type": "application/json"},
-            json={"text": data.get("text", str(data)), "mode": "now"},
+            json={"text": msg, "mode": "now", "booking": data},
             timeout=10,
         )
         return jsonify({"status": "ok", "appa_status": resp.status_code})
     except Exception as e:
         return jsonify({"status": "error", "detail": str(e)}), 502
+
+
+@app.route("/api/booking-status/<int:booking_id>", methods=["GET", "OPTIONS"])
+def api_booking_status(booking_id):
+    if request.method == "OPTIONS":
+        return "", 204
+    try:
+        import sqlite3
+        from pathlib import Path
+        conn = sqlite3.connect(str(Path(__file__).parent / "vault.db"))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
+        conn.close()
+        if not row:
+            return jsonify({"error": "Booking not found"}), 404
+        d = dict(row)
+        # Expose confirmation_number for frontend polling
+        if d.get("status") == "confirmed" and d.get("aeroplan_ref"):
+            d["confirmation_number"] = d["aeroplan_ref"]
+        return jsonify(d)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────
+import sqlite3 as _sqlite3
+from pathlib import Path as _Path
+
+_DB_PATH = str(_Path(__file__).parent / "vault.db")
+
+def _get_db():
+    conn = _sqlite3.connect(_DB_PATH, timeout=10)
+    conn.row_factory = _sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+def _init_users_table():
+    conn = _get_db()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            email         TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            first_name    TEXT NOT NULL,
+            last_name     TEXT NOT NULL,
+            dob           TEXT,
+            gender        TEXT,
+            phone         TEXT,
+            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+_init_users_table()
+
+def _user_dict(row):
+    return {
+        "email":     row["email"],
+        "firstName": row["first_name"],
+        "lastName":  row["last_name"],
+        "dob":       row["dob"],
+        "gender":    row["gender"],
+        "phone":     row["phone"],
+    }
+
+
+@app.route("/api/auth/signup", methods=["POST", "OPTIONS"])
+def api_auth_signup():
+    if request.method == "OPTIONS":
+        return "", 204
+    import bcrypt
+    body = request.get_json(force=True, silent=True) or {}
+    email      = (body.get("email") or "").strip().lower()
+    password   = body.get("password") or ""
+    first_name = (body.get("first_name") or "").strip()
+    last_name  = (body.get("last_name") or "").strip()
+    dob        = body.get("dob") or None
+    gender     = body.get("gender") or None
+    phone      = body.get("phone") or None
+
+    if not email or not password or not first_name or not last_name:
+        return jsonify({"error": "email, password, first_name and last_name are required."}), 400
+
+    pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    try:
+        conn = _get_db()
+        conn.execute(
+            "INSERT INTO users (email, password_hash, first_name, last_name, dob, gender, phone) VALUES (?,?,?,?,?,?,?)",
+            (email, pw_hash, first_name, last_name, dob, gender, phone)
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        conn.close()
+        return jsonify({"user": _user_dict(row)}), 200
+    except _sqlite3.IntegrityError:
+        return jsonify({"error": "An account with that email already exists."}), 409
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/auth/login", methods=["POST", "OPTIONS"])
+def api_auth_login():
+    if request.method == "OPTIONS":
+        return "", 204
+    import bcrypt
+    body     = request.get_json(force=True, silent=True) or {}
+    email    = (body.get("email") or "").strip().lower()
+    password = body.get("password") or ""
+
+    if not email or not password:
+        return jsonify({"error": "email and password are required."}), 400
+
+    conn = _get_db()
+    row  = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    conn.close()
+
+    if not row:
+        return jsonify({"error": "No account found with that email."}), 404
+    if not bcrypt.checkpw(password.encode(), row["password_hash"].encode()):
+        return jsonify({"error": "Incorrect password."}), 401
+
+    return jsonify({"user": _user_dict(row)}), 200
+
+
+# ── Booking approval constants ───────────────────────────────────────────────
+BOOKING_APPROVE_TOKEN = os.environ.get("BOOKING_APPROVE_TOKEN", "booking-approve-token-2026")
+KILL_TOKEN             = os.environ.get("KILL_TOKEN",             "kill-switch-token-2026")
+
+
+def _appa_notify(text: str):
+    """Send a wake-text to Appa's hook."""
+    url   = os.getenv("APPA_HOOK_URL",   "https://hooks.airbitrage.io/hooks/wake")
+    token = os.getenv("APPA_TOKEN",      "flightdash-hook-token-2026")
+    try:
+        _requests.post(
+            url,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"text": text, "mode": "now"},
+            timeout=8,
+        )
+    except Exception as e:
+        print(f"[appa_notify] failed: {e}")
+
+
+@app.route("/api/book-complete", methods=["POST", "OPTIONS"])
+def api_book_complete():
+    """Accept a booking request, store it as pending_approval, notify Appa."""
+    if request.method == "OPTIONS":
+        return "", 204
+
+    data   = request.get_json(force=True, silent=True) or {}
+    flight = data.get("flight", {})
+    client = data.get("client", {})
+
+    if not flight or not client:
+        return jsonify({"error": "Missing required fields: flight, client"}), 400
+
+    origin      = flight.get("origin", "")
+    destination = flight.get("destination", "")
+    date        = flight.get("date", "")
+    cabin       = flight.get("cabin", "business")
+    first_name  = client.get("first_name", "")
+    last_name   = client.get("last_name", "")
+
+    if not all([origin, destination, date, first_name, last_name]):
+        return jsonify({"error": "Missing required fields in flight or client"}), 400
+
+    # Store as pending_approval — Appa must approve before booking fires
+    import json as _json
+    conn = _get_db()
+    conn.execute(
+        "INSERT INTO bookings (vault_id, passenger_name, flight_ref, miles_used, taxes_paid, status) "
+        "VALUES (2, ?, ?, 0, 0.0, 'pending_approval')",
+        (f"{first_name} {last_name}", f"{origin}-{destination}-{date}"),
+    )
+    conn.commit()
+    booking_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    # Stash full payload in aeroplan_ref for retrieval on approval
+    conn.execute("UPDATE bookings SET aeroplan_ref=? WHERE id=?",
+                 (_json.dumps({**data, "flight": flight, "client": client}), booking_id))
+    conn.commit()
+    conn.close()
+
+    # Notify Appa
+    msg = (
+        f"\U0001f3ab BOOKING REQUEST #{booking_id}\n"
+        f"Route: {origin} \u2192 {destination}\n"
+        f"Date: {date} | Cabin: {cabin.title()}\n"
+        f"Passenger: {first_name} {last_name}\n"
+        f"\nApprove or deny:\n"
+        f"  approve: POST https://api.airbitrage.io/api/booking-approve "
+        f'body={{"booking_id":{booking_id},"action":"approve","token":"{BOOKING_APPROVE_TOKEN}"}}\n'
+        f"  deny: same with action=deny"
+    )
+    _appa_notify(msg)
+
+    return jsonify({
+        "status":     "pending_approval",
+        "booking_id": booking_id,
+        "message":    f"Booking #{booking_id} received — awaiting approval. Poll /api/booking-status/{booking_id}",
+    }), 202
+
+
+@app.route("/api/booking-approve", methods=["POST", "OPTIONS"])
+def api_booking_approve():
+    """Approve or deny a pending booking. Token-gated."""
+    if request.method == "OPTIONS":
+        return "", 204
+
+    import json as _json, subprocess, sys
+    data       = request.get_json(force=True, silent=True) or {}
+    token      = data.get("token", "")
+    booking_id = data.get("booking_id")
+    action     = data.get("action", "").lower()
+
+    if token != BOOKING_APPROVE_TOKEN:
+        return jsonify({"error": "unauthorized"}), 403
+    if not booking_id or action not in ("approve", "deny"):
+        return jsonify({"error": "booking_id and action (approve|deny) required"}), 400
+
+    conn = _get_db()
+    row  = conn.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "Booking not found"}), 404
+
+    stored = {}
+    try:
+        stored = _json.loads(row["aeroplan_ref"] or "{}")
+    except Exception:
+        pass
+
+    if action == "deny":
+        conn.execute("UPDATE bookings SET status='denied' WHERE id=?", (booking_id,))
+        conn.commit()
+        conn.close()
+        _appa_notify(f"\u274c Booking #{booking_id} denied. No action taken.")
+        return jsonify({"ok": True, "status": "denied", "booking_id": booking_id})
+
+    # Approve — launch book_alaska.py
+    conn.execute("UPDATE bookings SET status='approved' WHERE id=?", (booking_id,))
+    conn.commit()
+    conn.close()
+
+    flight = stored.get("flight", {})
+    client = stored.get("client", {})
+    script = os.path.join(os.path.dirname(__file__), "book_alaska.py")
+    cmd = [
+        sys.executable, script,
+        "--origin",     flight.get("origin", ""),
+        "--dest",       flight.get("destination", ""),
+        "--date",       flight.get("date", ""),
+        "--first",      client.get("first_name", ""),
+        "--last",       client.get("last_name", ""),
+        "--dob",        client.get("dob", ""),
+        "--cabin",      flight.get("cabin", "business"),
+        "--card",       client.get("card_last4", "2002"),
+        "--booking-id", str(booking_id),
+    ]
+    subprocess.Popen(cmd)
+    _appa_notify(f"\u2705 Booking #{booking_id} approved \u2014 launching booking agent.")
+    return jsonify({"ok": True, "status": "approved", "booking_id": booking_id})
+
+
+@app.route("/api/kill", methods=["POST", "OPTIONS"])
+def api_kill():
+    """Kill switch \u2014 stop all booking processes. Token-gated."""
+    if request.method == "OPTIONS":
+        return "", 204
+
+    import subprocess
+    data = request.get_json(force=True, silent=True) or {}
+    if data.get("token") != KILL_TOKEN:
+        return jsonify({"error": "unauthorized"}), 403
+
+    result = subprocess.run(["pkill", "-f", "book_alaska.py"], capture_output=True)
+    conn = _get_db()
+    conn.execute("UPDATE bookings SET status='cancelled' WHERE status IN ('pending_approval','approved')")
+    conn.commit()
+    conn.close()
+    _appa_notify("\U0001f6d1 KILL SWITCH activated. All booking processes stopped.")
+    return jsonify({"ok": True, "killed": result.returncode == 0})
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
