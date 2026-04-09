@@ -2364,8 +2364,27 @@ def _build_enrichment(flight: dict) -> dict:
     return result
 
 
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8737729247:AAEhw9cDx9RX85LRBlmgRnU14Yr4NXcEbsk")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID",   "6725239139")
+
+
+def _telegram_notify(text: str):
+    """Send a message directly to Sami's Telegram via Bot API."""
+    try:
+        _requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
+            timeout=8,
+        )
+    except Exception as e:
+        print(f"[telegram_notify] failed: {e}")
+
+
 def _appa_notify(text: str):
-    """Send a wake-text to Appa's hook."""
+    """Send a wake-text to Appa's hook AND directly to Telegram."""
+    # Direct Telegram — always works regardless of which OpenClaw is running
+    _telegram_notify(text)
+    # Also ping Appa hook (best-effort)
     url   = os.getenv("APPA_HOOK_URL",   "https://hooks.airbitrage.io/hooks/wake")
     token = os.getenv("APPA_TOKEN",      "flightdash-hook-token-2026")
     try:
@@ -2376,7 +2395,7 @@ def _appa_notify(text: str):
             timeout=8,
         )
     except Exception as e:
-        print(f"[appa_notify] failed: {e}")
+        print(f"[appa_notify] hook failed: {e}")
 
 
 @app.route("/api/book-complete", methods=["POST", "OPTIONS"])
