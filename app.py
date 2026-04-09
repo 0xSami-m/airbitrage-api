@@ -1871,6 +1871,33 @@ def api_booking_approve():
     return jsonify({"ok": True, "status": "approved", "booking_id": booking_id})
 
 
+@app.route("/api/booking-enrich", methods=["POST", "OPTIONS"])
+def api_booking_enrich():
+    """Store enrichment data (FlyAi ref, Google Flights link, review) on a booking."""
+    if request.method == "OPTIONS":
+        return "", 204
+    import json as _json
+    data       = request.get_json(force=True, silent=True) or {}
+    token      = data.get("token", "")
+    booking_id = data.get("booking_id")
+    enrichment = data.get("enrichment", {})
+    flyai_ref  = enrichment.get("flyai_ref", "")
+
+    if token != BOOKING_APPROVE_TOKEN:
+        return jsonify({"error": "unauthorized"}), 403
+    if not booking_id:
+        return jsonify({"error": "booking_id required"}), 400
+
+    conn = _get_db()
+    conn.execute(
+        "UPDATE bookings SET flyai_ref=?, enrichment=? WHERE id=?",
+        (flyai_ref, _json.dumps(enrichment), booking_id)
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "booking_id": booking_id, "flyai_ref": flyai_ref})
+
+
 @app.route("/api/kill", methods=["POST", "OPTIONS"])
 def api_kill():
     """Kill switch \u2014 stop all booking processes. Token-gated."""
