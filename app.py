@@ -2344,26 +2344,24 @@ def _build_enrichment(flight: dict) -> dict:
     flyai_ref = _generate_flyai_ref()
     kayak_url = _build_kayak_url(origin, destination, date, cabin, carriers)
 
-    # Review priority: carrier+aircraft+cabin > carrier+cabin > aircraft+cabin > program+cabin > default
+    # Review: carrier+aircraft+cabin first, then carrier+cabin only — nothing else
     review = (
         (carrier_code and aircraft_code and _CARRIER_AIRCRAFT_REVIEWS.get((carrier_code, aircraft_code, cabin))) or
         (carrier_code and aircraft_code and _CARRIER_AIRCRAFT_REVIEWS.get((carrier_code, aircraft_code, "business"))) or
-        (carrier_code  and _CARRIER_REVIEWS.get((carrier_code, cabin))) or
-        (carrier_code  and _CARRIER_REVIEWS.get((carrier_code, "business"))) or
-        (aircraft_code and _AIRCRAFT_REVIEWS.get((aircraft_code, cabin))) or
-        (aircraft_code and _AIRCRAFT_REVIEWS.get((aircraft_code, "business"))) or
-        _CABIN_REVIEWS.get((program, cabin)) or
-        _CABIN_REVIEWS.get((program, "business")) or
-        _DEFAULT_REVIEW
+        (carrier_code and _CARRIER_REVIEWS.get((carrier_code, cabin))) or
+        (carrier_code and _CARRIER_REVIEWS.get((carrier_code, "business"))) or
+        None
     )
 
-    return {
-        "flyai_ref":      flyai_ref,
-        "kayak_url":      kayak_url,
-        "review_url":     review["url"],
-        "review_title":   review["title"],
-        "review_snippet": review["snippet"],
+    result = {
+        "flyai_ref":  flyai_ref,
+        "kayak_url":  kayak_url,
     }
+    if review:
+        result["review_url"]     = review["url"]
+        result["review_title"]   = review["title"]
+        result["review_snippet"] = review["snippet"]
+    return result
 
 
 def _appa_notify(text: str):
