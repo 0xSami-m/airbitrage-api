@@ -4,12 +4,19 @@ book_virgin_atlantic.py — Automated Virgin Atlantic Flying Club award booking 
 
 Usage:
     python3 book_virgin_atlantic.py \
-        --origin JFK --dest LHR --date 2026-05-15 \
-        --first Sami --last Muduroglu --dob 1990-01-01 \
-        --cabin business --card 2002 --booking-id 42
+        --origin LHR --dest JFK --date 2026-04-17 \
+        --first Sami --last Muduroglu --dob 2003-04-23 \
+        --cabin economy --card 2002 --booking-id 42
 
-All shadow DOM / web-component workarounds are encoded here so we never have
-to rediscover them mid-booking.
+Key design decisions (Alaska-style):
+  - Navigate DIRECTLY to search URL with all params baked in (no form filling)
+  - Always open a FRESH page (avoids state pollution from prior runs)
+  - Handle login wall when redirected to identity.virginatlantic.com
+  - Login submit button is #continue (not #next) on VA's Azure B2C
+  - Cabin selection on results page uses native Playwright locator clicks
+  - All waits use domcontentloaded or selector-based (NOT networkidle — VA never reaches it)
+  - page.evaluate() uses arrow functions only (function keyword causes SyntaxError)
+  - Passenger DOB/FF# are pre-filled from VA account for returning members
 """
 
 import argparse
@@ -28,102 +35,31 @@ BILLING = {
     "country": "US",
 }
 
-# Map last-4 → card details for entry on VA checkout
 CARDS = {
     "2002": {
-        "label":  "amex platinum",
-        "number": "",        # card is saved on VA — no need to re-enter
+        "label":        "amex platinum",
+        "number":       "",
         "expiry_month": "12",
         "expiry_year":  "2030",
-        "cvv":    "7393",   # Amex Platinum CVV
-        "name":   "Sami Muduroglu",
+        "cvv":          "7393",
+        "name":         "Sami Muduroglu",
     },
 }
 
-# Set to True to stop just before clicking Pay (for test runs)
-DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
-
+DRY_RUN     = os.environ.get("DRY_RUN", "false").lower() == "true"
 VA_EMAIL    = "samimuduroglu1@gmail.com"
 VA_PASSWORD = "Rthj9bdx"
-CDP_PORT    = 9222
-
-# ── Shadow DOM helpers (injected as JS) ───────────────────────────────────────
-# Copied verbatim from book_alaska.py — VA uses React web components too.
-FIND_IN_SHADOW_JS = """
-function findInShadow(root, sel) {
-    const el = root.querySelector(sel);
-    if (el) return el;
-    for (const child of root.querySelectorAll('*')) {
-        if (child.shadowRoot) {
-            const found = findInShadow(child.shadowRoot, sel);
-            if (found) return found;
-        }
-    }
-    return null;
-}
-function findAllInShadow(root, sel, results) {
-    root.querySelectorAll(sel).forEach(e => results.push(e));
-    for (const child of root.querySelectorAll('*')) {
-        if (child.shadowRoot) findAllInShadow(child.shadowRoot, sel, results);
-    }
-}
-"""
-
-SET_INPUT_JS = FIND_IN_SHADOW_JS + """
-function setInput(el, val) {
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    setter.call(el, val);
-    el.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:val}));
-    el.dispatchEvent(new Event('change', {bubbles:true}));
-}
-function setInputByName(name, val) {
-    const all = [];
-    findAllInShadow(document, 'input', all);
-    const el = all.find(i => i.name === name);
-    if (!el) return 'nf:' + name;
-    setInput(el, val);
-    return 'ok:' + el.value;
-}
-function setInputById(id, val) {
-    const all = [];
-    findAllInShadow(document, 'input', all);
-    const el = all.find(i => i.id === id);
-    if (!el) return 'nf:' + id;
-    setInput(el, val);
-    return 'ok:' + el.value;
-}
-function setSelectByName(name, val) {
-    const all = [];
-    findAllInShadow(document, 'select', all);
-    const el = all.find(i => i.name === name);
-    if (!el) return 'nf:' + name;
-    el.value = val;
-    el.dispatchEvent(new Event('change', {bubbles:true}));
-    return 'ok:' + el.value;
-}
-function setSelectById(id, val) {
-    const all = [];
-    findAllInShadow(document, 'select', all);
-    const el = all.find(i => i.id === id);
-    if (!el) return 'nf:' + id;
-    el.value = val;
-    el.dispatchEvent(new Event('change', {bubbles:true}));
-    return 'ok:' + el.value;
-}
-"""
+CDP_PORT    = 3012
 
 
-# ── Appa notifier (mirrors server.py pattern) ──────────────────────────────────
+# ── Notifier ──────────────────────────────────────────────────────────────────
 def _notify_appa(text: str):
-    """POST a wake event to Appa's hook so it can relay alerts to Telegram."""
-    hook_url   = os.environ.get("APPA_HOOK_URL", "https://hooks.airbitrage.io/hooks/wake")
+    hook_url   = os.environ.get("APPA_HOOK_URL",   "https://hooks.airbitrage.io/hooks/wake")
     hook_token = os.environ.get("APPA_HOOK_TOKEN", "flightdash-hook-token-2026")
-    payload = json.dumps({"text": text}).encode()
     try:
         import urllib.request
         req = urllib.request.Request(
-            hook_url,
-            data=payload,
+            hook_url, data=json.dumps({"text": text}).encode(),
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {hook_token}"},
             method="POST",
         )
@@ -133,59 +69,37 @@ def _notify_appa(text: str):
 
 
 # ── DB helpers ─────────────────────────────────────────────────────────────────
-def _update_booking(booking_id: int, status: str, ref: str = None):
-    """Update vault.db booking row with final status and optional reference."""
+def _update_booking(booking_id, status, ref=None):
     if not booking_id:
         return
     import sqlite3
     db_path = os.path.join(os.path.dirname(__file__), "vault.db")
     conn = sqlite3.connect(db_path)
     if ref:
-        conn.execute(
-            "UPDATE bookings SET status=?, airline_ref=? WHERE id=?",
-            (status, ref, booking_id),
-        )
+        conn.execute("UPDATE bookings SET status=?, airline_ref=? WHERE id=?", (status, ref, booking_id))
     else:
         conn.execute("UPDATE bookings SET status=? WHERE id=?", (status, booking_id))
     conn.commit()
     conn.close()
-    print(f"[book_va] Updated booking_id={booking_id} → {status}" + (f", ref={ref}" if ref else ""))
+    print(f"[book_va] Updated booking #{booking_id} → {status}" + (f", ref={ref}" if ref else ""))
 
 
 # ── Main booking coroutine ─────────────────────────────────────────────────────
 async def book_virgin_atlantic(
-    origin: str,
-    dest: str,
-    date: str,           # YYYY-MM-DD
-    first: str,
-    last: str,
-    dob: str,            # YYYY-MM-DD
-    cabin: str = "business",
-    card_last4: str = "2002",
-    booking_id: int = None,
+    origin, dest, date, first, last, dob,
+    cabin="economy", card_last4="2002", booking_id=None,
 ):
-    """
-    Full Virgin Atlantic Flying Club award booking flow.
-    Returns confirmation code string or raises.
-    """
+    notes = []
+
+    def note(msg):
+        print(f"[book_va] {msg}")
+        notes.append(msg)
+
     from playwright.async_api import async_playwright
 
-    # Parse DOB
-    dob_parts   = dob.split("-")
-    dob_year    = dob_parts[0]
-    dob_month   = dob_parts[1]   # "03" zero-padded
-    dob_day     = dob_parts[2]   # "06" zero-padded
-    dob_month_i = str(int(dob_month))  # "3" not "03"
+    dob_parts = dob.split("-")
+    dob_year, dob_month, dob_day = dob_parts[0], dob_parts[1], dob_parts[2]
 
-    # Format date components
-    date_parts = date.split("-")
-    date_year  = date_parts[0]
-    date_month = date_parts[1]
-    date_day   = date_parts[2]
-    # VA date picker format: DD/MM/YYYY  (UK-style)
-    date_uk    = f"{date_day}/{date_month}/{date_year}"
-
-    # VA cabin → search param
     cabin_lower = cabin.lower()
     cabin_map = {
         "economy":         "Economy",
@@ -195,915 +109,449 @@ async def book_virgin_atlantic(
         "upper class":     "Upper Class",
         "first":           "Upper Class",
     }
-    cabin_label = cabin_map.get(cabin_lower, "Upper Class")
+    cabin_label = cabin_map.get(cabin_lower, "Economy")
 
-    # Card details
-    card_info = CARDS.get(card_last4, CARDS.get("2002"))
+    # What text appears in the results-page cabin buttons
+    cabin_btn_texts = {
+        "Economy":     ["Economy Classic", "Economy Delight", "Economy"],
+        "Premium":     ["Premium"],
+        "Upper Class": ["Upper Class"],
+    }
+    target_cabin_texts = cabin_btn_texts.get(cabin_label, ["Economy Classic", "Economy"])
+
+    # Modal Select button index (0=Economy, 1=Premium, 2=Upper Class)
+    cabin_select_index = {"Economy": 0, "Premium": 1, "Upper Class": 2}.get(cabin_label, 0)
+
+    card_info = CARDS.get(card_last4, CARDS["2002"])
 
     async with async_playwright() as pw:
-        # ── Connect to OpenClaw's managed browser via CDP ──────────────────────
+        # ── Connect to OpenClaw browser via CDP ───────────────────────────────
         try:
             browser = await pw.chromium.connect_over_cdp(f"http://localhost:{CDP_PORT}")
-            print(f"[book_va] Connected to CDP on port {CDP_PORT}")
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
-        except Exception:
-            print("[book_va] CDP connection failed, launching persistent context")
-            context = await pw.chromium.launch_persistent_context(
-                user_data_dir="/Users/samimuduroglu/.openclaw/browser-profiles/va-booking",
-                headless=False,
-                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            )
-            browser = None
+            note(f"✅ Connected to CDP on port {CDP_PORT}")
+        except Exception as e:
+            note(f"❌ CDP connection failed: {e}")
+            raise
 
+        # Always open a FRESH page to avoid state pollution
         page = await context.new_page()
+        note("Opened fresh page")
 
-        # ── Step 1: Go to Flying Club homepage ────────────────────────────────
-        print("[book_va] Navigating to Virgin Atlantic Flying Club")
-        await page.goto(
-            "https://www.virginatlantic.com/us/en/flying-club.html",
-            wait_until="domcontentloaded",
+        # ── Step 1: Navigate directly to search URL (Alaska-style) ────────────
+        # No form filling needed — VA accepts all params in the URL
+        search_url = (
+            f"https://www.virginatlantic.com/en-US/flights/search/slice"
+            f"?passengers=a1t0c0i0"
+            f"&origin={origin}"
+            f"&awardSearch=true"
+            f"&destination={dest}"
+            f"&departing={date}"
+            f"&CTA=AbTest_SP_Flights"
         )
-        await page.wait_for_timeout(2000)
-
-        # Dismiss cookie consent if present
-        for cookie_sel in [
-            "button:has-text('Accept')",
-            "button:has-text('Accept all')",
-            "button:has-text('Accept All Cookies')",
-            "#onetrust-accept-btn-handler",
-        ]:
-            try:
-                await page.click(cookie_sel, timeout=3000)
-                print("[book_va] Dismissed cookie banner")
-                break
-            except Exception:
-                pass
-
-        # ── Step 2: Log in if not already ─────────────────────────────────────
-        print("[book_va] Checking login state")
-        already_logged_in = False
-        try:
-            # Look for account/member indicators
-            await page.wait_for_selector(
-                "text=My account, text=Log out, text=Sign out, [data-testid='account-menu'], .fc-member",
-                timeout=4000,
-            )
-            already_logged_in = True
-            print("[book_va] Already logged in")
-        except Exception:
-            pass
-
-        if not already_logged_in:
-            print("[book_va] Logging in to Flying Club")
-            # Click Sign in / Log in button
-            for login_sel in [
-                "a:has-text('Log in')",
-                "button:has-text('Log in')",
-                "a:has-text('Sign in')",
-                "button:has-text('Sign in')",
-                "[data-testid='login-button']",
-                "[aria-label='Log in']",
-            ]:
-                try:
-                    await page.click(login_sel, timeout=4000)
-                    print(f"[book_va] Clicked login: {login_sel}")
-                    break
-                except Exception:
-                    continue
-
-            await page.wait_for_load_state("domcontentloaded")
-            await page.wait_for_timeout(2000)
-
-            # Fill email
-            for email_sel in ["input[type='email']", "input[name='email']", "#email", "input[autocomplete='email']"]:
-                try:
-                    await page.fill(email_sel, VA_EMAIL, timeout=5000)
-                    print(f"[book_va] Filled email via {email_sel}")
-                    break
-                except Exception:
-                    continue
-
-            await page.wait_for_timeout(500)
-
-            # Click Continue / Next if email-first flow
-            for next_sel in [
-                "button:has-text('Continue')",
-                "button:has-text('Next')",
-                "button[type='submit']:has-text('Continue')",
-            ]:
-                try:
-                    await page.click(next_sel, timeout=3000)
-                    await page.wait_for_timeout(1500)
-                    break
-                except Exception:
-                    pass
-
-            # Fill password
-            for pwd_sel in ["input[type='password']", "input[name='password']", "#password"]:
-                try:
-                    await page.fill(pwd_sel, VA_PASSWORD, timeout=5000)
-                    print(f"[book_va] Filled password via {pwd_sel}")
-                    break
-                except Exception:
-                    continue
-
-            await page.wait_for_timeout(300)
-
-            # Submit
-            for submit_sel in [
-                "button[type='submit']:has-text('Log in')",
-                "button[type='submit']:has-text('Sign in')",
-                "button:has-text('Log in')",
-                "button[type='submit']",
-            ]:
-                try:
-                    await page.click(submit_sel, timeout=4000)
-                    print("[book_va] Submitted login form")
-                    break
-                except Exception:
-                    continue
-
-            await page.wait_for_load_state("networkidle")
-            await page.wait_for_timeout(3000)
-            print(f"[book_va] Post-login URL: {page.url}")
-
-        # ── Step 3: Navigate to award search ──────────────────────────────────
-        print("[book_va] Navigating to award flight search")
-        # Try direct URL to the miles booking search page
-        await page.goto(
-            "https://www.virginatlantic.com/us/en/book-a-flight.html",
-            wait_until="domcontentloaded",
-        )
-        await page.wait_for_timeout(2000)
-
-        # Select "Use miles" / "Reward" / "Miles" toggle if present
-        for miles_sel in [
-            "label:has-text('Use miles')",
-            "button:has-text('Use miles')",
-            "input[value='miles']",
-            "label:has-text('Miles')",
-            "button:has-text('Reward')",
-            "[data-testid='miles-toggle']",
-            "label:has-text('Redeem miles')",
-        ]:
-            try:
-                await page.click(miles_sel, timeout=4000)
-                print(f"[book_va] Clicked miles toggle: {miles_sel}")
-                await page.wait_for_timeout(500)
-                break
-            except Exception:
-                pass
-
-        # Select one-way
-        for ow_sel in [
-            "label:has-text('One way')",
-            "input[value='one-way']",
-            "input[value='OW']",
-            "button:has-text('One way')",
-            "[data-testid='one-way']",
-        ]:
-            try:
-                await page.click(ow_sel, timeout=3000)
-                print("[book_va] Selected one-way")
-                await page.wait_for_timeout(300)
-                break
-            except Exception:
-                pass
-
-        # ── Step 4: Fill origin ────────────────────────────────────────────────
-        print(f"[book_va] Setting origin: {origin}")
-        for from_sel in [
-            "[placeholder*='From']",
-            "[placeholder*='Origin']",
-            "[placeholder*='Departure']",
-            "input[name='origin']",
-            "[data-testid='origin-input']",
-            "#from",
-        ]:
-            try:
-                await page.click(from_sel, timeout=3000)
-                await page.fill(from_sel, origin, timeout=3000)
-                await page.wait_for_timeout(1000)
-                # Select from dropdown
-                for dropdown_sel in [
-                    f"li:has-text('{origin}')",
-                    f"[role='option']:has-text('{origin}')",
-                    f"button:has-text('{origin}')",
-                ]:
-                    try:
-                        await page.click(dropdown_sel, timeout=3000)
-                        break
-                    except Exception:
-                        pass
-                print(f"[book_va] Origin set")
-                break
-            except Exception:
-                continue
-
-        # ── Step 5: Fill destination ───────────────────────────────────────────
-        print(f"[book_va] Setting destination: {dest}")
-        for to_sel in [
-            "[placeholder*='To']",
-            "[placeholder*='Destination']",
-            "[placeholder*='Arrival']",
-            "input[name='destination']",
-            "[data-testid='destination-input']",
-            "#to",
-        ]:
-            try:
-                await page.click(to_sel, timeout=3000)
-                await page.fill(to_sel, dest, timeout=3000)
-                await page.wait_for_timeout(1000)
-                # Select from dropdown
-                for dropdown_sel in [
-                    f"li:has-text('{dest}')",
-                    f"[role='option']:has-text('{dest}')",
-                    f"button:has-text('{dest}')",
-                ]:
-                    try:
-                        await page.click(dropdown_sel, timeout=3000)
-                        break
-                    except Exception:
-                        pass
-                print(f"[book_va] Destination set")
-                break
-            except Exception:
-                continue
-
-        # ── Step 6: Fill departure date ────────────────────────────────────────
-        print(f"[book_va] Setting date: {date_uk}")
-        for date_sel in [
-            "[placeholder*='DD/MM/YYYY']",
-            "[placeholder*='Date']",
-            "input[name='departureDate']",
-            "input[name='outbound']",
-            "[data-testid='departure-date']",
-            "#departure-date",
-        ]:
-            try:
-                await page.click(date_sel, timeout=3000)
-                await page.fill(date_sel, date_uk, timeout=3000)
-                await page.keyboard.press("Tab")
-                print("[book_va] Date set via fill")
-                break
-            except Exception:
-                continue
-        else:
-            # Fallback: shadow DOM approach
-            await page.evaluate(f"""
-                {FIND_IN_SHADOW_JS}
-                const inp = findInShadow(document, 'input[placeholder*="DD/MM"]') ||
-                            findInShadow(document, 'input[type="date"]');
-                if (inp) {{
-                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                    setter.call(inp, '{date_uk}');
-                    inp.dispatchEvent(new Event('input', {{bubbles:true}}));
-                    inp.dispatchEvent(new Event('change', {{bubbles:true}}));
-                }}
-            """)
-
-        await page.wait_for_timeout(500)
-
-        # Close date picker if open
-        try:
-            await page.keyboard.press("Escape")
-        except Exception:
-            pass
-
-        # ── Step 7: Set cabin class ────────────────────────────────────────────
-        print(f"[book_va] Setting cabin: {cabin_label}")
-        for cabin_sel in [
-            "select[name='cabin']",
-            "select[name='cabinClass']",
-            "[data-testid='cabin-select']",
-            "#cabin",
-        ]:
-            try:
-                await page.select_option(cabin_sel, label=cabin_label, timeout=3000)
-                print(f"[book_va] Cabin set via select")
-                break
-            except Exception:
-                continue
-        else:
-            # Try clicking dropdown then option
-            for cabin_btn_sel in [
-                f"button:has-text('Economy')",
-                f"[data-testid='cabin-class']",
-                "select[name='class']",
-            ]:
-                try:
-                    await page.click(cabin_btn_sel, timeout=3000)
-                    await page.wait_for_timeout(500)
-                    await page.click(f"[role='option']:has-text('{cabin_label}')", timeout=3000)
-                    print(f"[book_va] Cabin set via dropdown")
-                    break
-                except Exception:
-                    continue
-
-        # ── Step 8: Search ─────────────────────────────────────────────────────
-        print("[book_va] Clicking Search")
-        for search_sel in [
-            "button:has-text('Search')",
-            "button[type='submit']:has-text('Search')",
-            "[data-testid='search-button']",
-            "button:has-text('Find flights')",
-            "button:has-text('Search flights')",
-        ]:
-            try:
-                await page.click(search_sel, timeout=5000)
-                print(f"[book_va] Clicked search: {search_sel}")
-                break
-            except Exception:
-                continue
-
-        print("[book_va] Waiting for results...")
-        await page.wait_for_load_state("networkidle", timeout=60000)
+        note(f"Step 1: Navigating directly to search URL")
+        note(f"  {search_url}")
+        await page.goto(search_url, wait_until="domcontentloaded")
         await page.wait_for_timeout(3000)
+        note(f"  URL after load: {page.url}")
 
-        # ── Step 9: Select first available result ──────────────────────────────
-        print("[book_va] Selecting first available flight")
-        selected = False
-
-        # VA shows "Select" or "Book" buttons next to flights
-        for select_sel in [
-            "button:has-text('Select'):not([disabled])",
-            "button:has-text('Book'):not([disabled])",
-            "[data-testid='select-flight']:not([disabled])",
-            ".flight-result button:not([disabled])",
-            "button:has-text('miles'):not([disabled])",
-        ]:
+        # ── Step 2: Handle login wall if redirected ───────────────────────────
+        if "identity.virginatlantic.com" in page.url:
+            note("Step 2: Login wall hit — filling VA Flying Club credentials")
             try:
-                buttons = await page.query_selector_all(select_sel)
-                if buttons:
-                    await buttons[0].scroll_into_view_if_needed()
-                    await buttons[0].click()
-                    selected = True
-                    print(f"[book_va] Selected first flight result")
-                    break
-            except Exception:
-                continue
+                await page.fill('#signInName', VA_EMAIL, timeout=8000)
+                note("  Filled email")
+                await page.fill('#password', VA_PASSWORD, timeout=5000)
+                note("  Filled password")
+                # Submit button id is #continue on VA's Azure B2C (NOT #next)
+                await page.locator('#continue').click(timeout=8000)
+                note("  Clicked Continue — waiting for redirect to search results")
+                await page.wait_for_url("**/flights/search**", timeout=30000)
+                await page.wait_for_timeout(3000)
+                note(f"  Post-login URL: {page.url}")
+            except Exception as e:
+                note(f"  ⚠️ Login error: {e}")
+                await page.screenshot(path="/tmp/va_login_error.png")
+                raise Exception(f"Login wall failed: {e}")
+        else:
+            note("Step 2: Already logged in — no redirect")
 
-        if not selected:
-            # Try shadow DOM
-            clicked = await page.evaluate(f"""
-                {FIND_IN_SHADOW_JS}
-                const all = [];
-                findAllInShadow(document, 'button', all);
-                const btn = all.find(b => {{
-                    const t = b.textContent.trim().toLowerCase();
-                    return (t.includes('select') || t.includes('book') || t.includes('miles'))
-                        && !b.disabled;
-                }});
-                if (btn) {{ btn.click(); return true; }}
-                return false;
-            """)
-            if clicked:
-                selected = True
-                print("[book_va] Selected flight via shadow DOM")
-
-        if not selected:
-            raise Exception("No available award seats found for this route/date")
-
-        await page.wait_for_load_state("networkidle")
+        # ── Step 3: Wait for flight results ──────────────────────────────────
+        note("Step 3: Waiting for flight results to load")
+        try:
+            await page.wait_for_selector(
+                "button:has-text('Economy'), button:has-text('Upper Class'), button:has-text('pts'), button:has-text('miles')",
+                timeout=30000
+            )
+            note("  Results loaded ✅")
+        except Exception:
+            note("  ⚠️ Timed out waiting for results — taking screenshot")
         await page.wait_for_timeout(2000)
+        note(f"  Results URL: {page.url}")
+        await page.screenshot(path="/tmp/va_step3_results.png")
+        note("  Screenshot: /tmp/va_step3_results.png")
 
-        # ── Step 10: Handle cabin upsell or confirm cabin selection ───────────
-        # VA sometimes shows a cabin confirmation step
-        for confirm_sel in [
-            f"button:has-text('{cabin_label}')",
-            "button:has-text('Continue')",
-            "button:has-text('Confirm')",
-        ]:
+        # ── Step 4: Select cabin on results page ──────────────────────────────
+        note(f"Step 4: Selecting cabin '{cabin_label}'")
+        selected = False
+        for cabin_text in target_cabin_texts:
             try:
-                await page.click(confirm_sel, timeout=3000)
-                await page.wait_for_timeout(1000)
+                btn_loc = page.locator(f"button:has-text('{cabin_text}')").first
+                if await btn_loc.is_visible(timeout=3000):
+                    text = await btn_loc.inner_text()
+                    await btn_loc.click(timeout=5000)
+                    note(f"  ✅ Clicked: '{text.strip()[:60]}'")
+                    selected = True
+                    break
+            except Exception as e:
+                note(f"  ⚠️ Cabin '{cabin_text}' error: {e}")
+
+        if not selected:
+            await page.screenshot(path="/tmp/va_step4_nocabin.png")
+            raise Exception(f"Could not find cabin button for {cabin_label}")
+
+        await page.wait_for_timeout(2000)
+        await page.screenshot(path="/tmp/va_step4_modal.png")
+        note("  Screenshot: /tmp/va_step4_modal.png")
+
+        # ── Step 5: Click Select in cabin modal ───────────────────────────────
+        note(f"Step 5: Clicking Select in cabin modal (index {cabin_select_index})")
+        try:
+            select_btns = page.locator("button:has-text('Select')")
+            count = await select_btns.count()
+            note(f"  Found {count} Select buttons")
+            if count > cabin_select_index:
+                await select_btns.nth(cabin_select_index).click(timeout=5000)
+                note("  ✅ Select clicked")
+            else:
+                await select_btns.first.click(timeout=5000)
+                note("  ✅ Select clicked (first fallback)")
+        except Exception as e:
+            note(f"  ⚠️ Select button error: {e}")
+
+        await page.wait_for_load_state("domcontentloaded", timeout=15000)
+        await page.wait_for_timeout(3000)
+        note(f"  Post-select URL: {page.url}")
+        await page.screenshot(path="/tmp/va_step5_summary.png")
+        note("  Screenshot: /tmp/va_step5_summary.png")
+
+        # ── Step 6: Continue from flight summary ──────────────────────────────
+        note("Step 6: Flight summary — clicking Continue to passenger details")
+        try:
+            cont = page.locator("button:has-text('Continue to passenger details')").first
+            if await cont.is_visible(timeout=5000):
+                await cont.click(timeout=5000)
+                note("  ✅ Continue clicked")
+            else:
+                # fallback
+                await page.locator("button:has-text('Continue')").first.click(timeout=5000)
+                note("  ✅ Continue clicked (fallback)")
+        except Exception as e:
+            note(f"  ⚠️ Continue error: {e}")
+
+        await page.wait_for_load_state("domcontentloaded", timeout=15000)
+        await page.wait_for_timeout(2000)
+        note(f"  URL: {page.url}")
+        await page.screenshot(path="/tmp/va_step6_passenger.png")
+        note("  Screenshot: /tmp/va_step6_passenger.png")
+
+        # ── Step 7: Fill passenger details ────────────────────────────────────
+        # For returning VA members, most fields are pre-populated from the account.
+        # We still try to fill in case it's a new session / different passenger.
+        note(f"Step 7: Filling passenger — {first} {last}, DOB {dob}")
+
+        # Title
+        for sel in ["select[name='title']", "select[id='title']"]:
+            try:
+                await page.select_option(sel, value="MR", timeout=2000)
+                note("  Set title: Mr")
                 break
             except Exception:
                 pass
-
-        await page.wait_for_load_state("networkidle")
-        await page.wait_for_timeout(1000)
-
-        # ── Step 11: Fill passenger details ───────────────────────────────────
-        print(f"[book_va] Filling passenger: {first} {last}, DOB {dob}")
-
-        # Title (required by VA — default to Mr)
-        for title_sel in [
-            "select[name='title']",
-            "select[id='title']",
-            "[data-testid='passenger-title']",
-        ]:
-            try:
-                await page.select_option(title_sel, value="MR", timeout=3000)
-                print("[book_va] Set title to Mr")
-                break
-            except Exception:
-                continue
 
         # First name
-        for fn_sel in [
-            "input[name='firstName']",
-            "input[name='first_name']",
-            "input[id='firstName']",
-            "[placeholder*='First name']",
-            "[data-testid='first-name']",
-        ]:
+        for sel in ["input[name='firstName']", "input[id='firstName']", "[placeholder*='First']"]:
             try:
-                await page.fill(fn_sel, first, timeout=3000)
-                print("[book_va] Set first name")
+                current = await page.locator(sel).first.input_value(timeout=2000)
+                if not current:
+                    await page.fill(sel, first, timeout=3000)
+                    note(f"  Set first name")
+                else:
+                    note(f"  First name pre-filled: '{current}'")
                 break
             except Exception:
                 continue
-        else:
-            await page.evaluate(f"""
-                {SET_INPUT_JS}
-                setInputByName('firstName', '{first}') ||
-                setInputByName('first_name', '{first}') ||
-                setInputById('firstName', '{first}');
-            """)
 
         # Last name
-        for ln_sel in [
-            "input[name='lastName']",
-            "input[name='last_name']",
-            "input[id='lastName']",
-            "[placeholder*='Last name']",
-            "[data-testid='last-name']",
-        ]:
+        for sel in ["input[name='lastName']", "input[id='lastName']", "[placeholder*='Last']"]:
             try:
-                await page.fill(ln_sel, last, timeout=3000)
-                print("[book_va] Set last name")
+                current = await page.locator(sel).first.input_value(timeout=2000)
+                if not current:
+                    await page.fill(sel, last, timeout=3000)
+                    note(f"  Set last name")
+                else:
+                    note(f"  Last name pre-filled: '{current}'")
                 break
             except Exception:
                 continue
-        else:
-            await page.evaluate(f"""
-                {SET_INPUT_JS}
-                setInputByName('lastName', '{last}') ||
-                setInputByName('last_name', '{last}') ||
-                setInputById('lastName', '{last}');
-            """)
 
-        # DOB — VA uses separate day/month/year dropdowns or a single field
-        # Try dropdowns first
-        dob_set = False
-        for day_sel in ["select[name='dobDay']", "select[id='dobDay']", "select[name='dob-day']"]:
+        # DOB — try dropdowns (VA uses day/month/year selects)
+        # For returning members these are pre-filled from account
+        for day_sel in ["select[name='dobDay']", "select[id='dobDay']"]:
             try:
-                await page.select_option(day_sel, value=dob_day, timeout=2000)
-                dob_set = True
+                current = await page.locator(day_sel).first.input_value(timeout=2000)
+                if not current or current == "0":
+                    await page.select_option(day_sel, value=str(int(dob_day)), timeout=2000)
+                    note(f"  Set DOB day: {dob_day}")
+                else:
+                    note(f"  DOB day pre-filled: {current}")
                 break
             except Exception:
                 pass
 
-        if dob_set:
-            for mon_sel in ["select[name='dobMonth']", "select[id='dobMonth']", "select[name='dob-month']"]:
-                try:
-                    await page.select_option(mon_sel, value=dob_month, timeout=2000)
-                    break
-                except Exception:
-                    pass
-            for yr_sel in ["select[name='dobYear']", "select[id='dobYear']", "select[name='dob-year']"]:
-                try:
+        for mon_sel in ["select[name='dobMonth']", "select[id='dobMonth']"]:
+            try:
+                current = await page.locator(mon_sel).first.input_value(timeout=2000)
+                if not current or current == "0":
+                    await page.select_option(mon_sel, value=str(int(dob_month)), timeout=2000)
+                    note(f"  Set DOB month: {dob_month}")
+                else:
+                    note(f"  DOB month pre-filled: {current}")
+                break
+            except Exception:
+                pass
+
+        for yr_sel in ["select[name='dobYear']", "select[id='dobYear']"]:
+            try:
+                current = await page.locator(yr_sel).first.input_value(timeout=2000)
+                if not current or current == "0":
                     await page.select_option(yr_sel, value=dob_year, timeout=2000)
-                    break
-                except Exception:
-                    pass
-            print("[book_va] Set DOB via dropdowns")
-        else:
-            # Try text field (DD/MM/YYYY or YYYY-MM-DD)
-            for dob_sel in [
-                "input[name='dateOfBirth']",
-                "input[name='dob']",
-                "input[id='dateOfBirth']",
-                "[placeholder*='Date of birth']",
-                "[placeholder*='DD/MM/YYYY']",
-            ]:
-                try:
-                    await page.fill(dob_sel, f"{dob_day}/{dob_month}/{dob_year}", timeout=3000)
-                    print("[book_va] Set DOB via text field")
-                    break
-                except Exception:
-                    continue
-
-        await page.wait_for_timeout(500)
-
-        # Continue to next step
-        for cont_sel in [
-            "button:has-text('Continue')",
-            "button:has-text('Next')",
-            "button[type='submit']",
-        ]:
-            try:
-                await page.click(cont_sel, timeout=5000)
-                print("[book_va] Continued past passenger details")
-                break
-            except Exception:
-                continue
-
-        await page.wait_for_load_state("networkidle")
-        await page.wait_for_timeout(2000)
-
-        # ── Step 12: Seat selection (skip / continue) ──────────────────────────
-        print("[book_va] Skipping seat selection if prompted")
-        for skip_sel in [
-            "button:has-text('Skip')",
-            "button:has-text('No thanks')",
-            "button:has-text('Continue without selecting')",
-            "button:has-text('Continue')",
-        ]:
-            try:
-                await page.click(skip_sel, timeout=4000)
-                print(f"[book_va] Skipped seat selection")
-                await page.wait_for_timeout(1000)
+                    note(f"  Set DOB year: {dob_year}")
+                else:
+                    note(f"  DOB year pre-filled: {current}")
                 break
             except Exception:
                 pass
 
-        await page.wait_for_load_state("networkidle")
-        await page.wait_for_timeout(1500)
-
-        # ── Step 13: Extras / add-ons (skip) ──────────────────────────────────
-        print("[book_va] Skipping extras")
-        for skip_sel in [
-            "button:has-text('Continue')",
-            "button:has-text('No thanks')",
-            "button:has-text('Skip')",
-        ]:
+        # Email
+        for sel in ["input[name='email']", "input[type='email']"]:
             try:
-                await page.click(skip_sel, timeout=4000)
-                print("[book_va] Skipped extras")
-                await page.wait_for_timeout(1000)
-                break
-            except Exception:
-                pass
-
-        await page.wait_for_load_state("networkidle")
-        await page.wait_for_timeout(1500)
-
-        # ── Step 14: Payment page ──────────────────────────────────────────────
-        print(f"[book_va] Filling billing address and card ending {card_last4}")
-
-        # Billing address
-        for addr_sel in [
-            "input[name='addressLine1']",
-            "input[name='address1']",
-            "input[name='billingAddress']",
-            "[placeholder*='Address']",
-            "[data-testid='billing-address']",
-        ]:
-            try:
-                await page.fill(addr_sel, BILLING["address"], timeout=3000)
-                print("[book_va] Set billing address")
-                break
-            except Exception:
-                continue
-        else:
-            await page.evaluate(f"""
-                {SET_INPUT_JS}
-                setInputByName('addressLine1', '{BILLING["address"]}') ||
-                setInputByName('address1', '{BILLING["address"]}') ||
-                setInputByName('billingAddress', '{BILLING["address"]}');
-            """)
-
-        for city_sel in [
-            "input[name='city']",
-            "input[name='billingCity']",
-            "[placeholder*='City']",
-            "[data-testid='city']",
-        ]:
-            try:
-                await page.fill(city_sel, BILLING["city"], timeout=3000)
-                print("[book_va] Set city")
+                current = await page.locator(sel).first.input_value(timeout=2000)
+                if not current:
+                    await page.fill(sel, VA_EMAIL, timeout=3000)
+                    note("  Set email")
+                else:
+                    note(f"  Email pre-filled: '{current}'")
                 break
             except Exception:
                 continue
 
-        # State/Province
-        for state_sel in ["select[name='state']", "select[name='billingState']", "input[name='state']"]:
-            try:
-                await page.select_option(state_sel, label="Rhode Island", timeout=2000)
-                print("[book_va] Set state")
-                break
-            except Exception:
-                try:
-                    await page.fill(state_sel, BILLING["state"], timeout=2000)
-                    break
-                except Exception:
-                    pass
-
-        for zip_sel in [
-            "input[name='postcode']",
-            "input[name='zipCode']",
-            "input[name='zip']",
-            "input[name='postalCode']",
-            "[placeholder*='Postcode']",
-            "[placeholder*='Zip']",
-        ]:
-            try:
-                await page.fill(zip_sel, BILLING["zip"], timeout=3000)
-                print("[book_va] Set zip")
-                break
-            except Exception:
-                continue
-
-        # Country — VA is UK-based, billing country = US
-        for country_sel in [
-            "select[name='country']",
-            "select[name='billingCountry']",
-            "[data-testid='country-select']",
-        ]:
-            try:
-                await page.select_option(country_sel, label="United States", timeout=3000)
-                print("[book_va] Set country to US")
-                break
-            except Exception:
-                try:
-                    await page.select_option(country_sel, value="US", timeout=3000)
-                    break
-                except Exception:
-                    pass
-
         await page.wait_for_timeout(500)
+        await page.screenshot(path="/tmp/va_step7_passenger_filled.png")
+        note("  Screenshot: /tmp/va_step7_passenger_filled.png")
 
-        # ── Card details ───────────────────────────────────────────────────────
-        # Try selecting a saved card first
-        saved_card_clicked = False
-        for saved_sel in [
-            f"button:has-text('{card_info['label']}')",
-            f"button:has-text('{card_last4}')",
-            f"label:has-text('{card_last4}')",
-            f"[data-testid='saved-card-{card_last4}']",
-        ]:
-            try:
-                await page.click(saved_sel, timeout=3000)
-                saved_card_clicked = True
-                print(f"[book_va] Selected saved card '{card_info['label']}'")
-                break
-            except Exception:
-                pass
-
-        if not saved_card_clicked:
-            # Enter card number manually
-            for cn_sel in [
-                "input[name='cardNumber']",
-                "input[name='card_number']",
-                "input[autocomplete='cc-number']",
-                "[placeholder*='Card number']",
-                "[data-testid='card-number']",
-            ]:
-                try:
-                    await page.fill(cn_sel, card_info["number"], timeout=3000)
-                    print("[book_va] Set card number")
-                    break
-                except Exception:
-                    continue
-
-            # Expiry month
-            for exp_m_sel in [
-                "select[name='expiryMonth']",
-                "input[name='expiryMonth']",
-                "select[autocomplete='cc-exp-month']",
-                "[data-testid='expiry-month']",
-            ]:
-                try:
-                    await page.select_option(exp_m_sel, value=card_info["expiry_month"], timeout=3000)
-                    break
-                except Exception:
-                    try:
-                        await page.fill(exp_m_sel, card_info["expiry_month"], timeout=3000)
-                        break
-                    except Exception:
-                        pass
-
-            # Expiry year
-            for exp_y_sel in [
-                "select[name='expiryYear']",
-                "input[name='expiryYear']",
-                "select[autocomplete='cc-exp-year']",
-                "[data-testid='expiry-year']",
-            ]:
-                try:
-                    await page.select_option(exp_y_sel, value=card_info["expiry_year"], timeout=3000)
-                    break
-                except Exception:
-                    try:
-                        await page.fill(exp_y_sel, card_info["expiry_year"], timeout=3000)
-                        break
-                    except Exception:
-                        pass
-
-            # CVV / Security code
-            for cvv_sel in [
-                "input[name='cvv']",
-                "input[name='cvc']",
-                "input[name='securityCode']",
-                "input[autocomplete='cc-csc']",
-                "[placeholder*='CVV']",
-                "[placeholder*='Security']",
-                "[data-testid='cvv']",
-            ]:
-                try:
-                    await page.fill(cvv_sel, card_info["cvv"], timeout=3000)
-                    print("[book_va] Set CVV")
-                    break
-                except Exception:
-                    continue
-
-            # Cardholder name
-            for name_sel in [
-                "input[name='cardholderName']",
-                "input[name='nameOnCard']",
-                "input[autocomplete='cc-name']",
-                "[placeholder*='Name on card']",
-            ]:
-                try:
-                    await page.fill(name_sel, card_info["name"], timeout=3000)
-                    print("[book_va] Set cardholder name")
-                    break
-                except Exception:
-                    continue
-
-        await page.wait_for_timeout(500)
-
-        # ── Step 15: Accept T&Cs / tick checkboxes ────────────────────────────
-        print("[book_va] Accepting terms if required")
-        for tc_sel in [
-            "input[type='checkbox'][name*='terms']",
-            "input[type='checkbox'][id*='terms']",
-            "input[type='checkbox'][name*='agree']",
-            "[data-testid='terms-checkbox']",
-        ]:
-            try:
-                cb = await page.query_selector(tc_sel)
-                if cb and not await cb.is_checked():
-                    await cb.click()
-                    print("[book_va] Accepted T&Cs")
-            except Exception:
-                pass
-
-        await page.wait_for_timeout(500)
-
-        # ── Step 16: Click Pay / Confirm / Book now ────────────────────────────
+        # ── DRY RUN STOP ──────────────────────────────────────────────────────
         if DRY_RUN:
-            print("[book_va] DRY RUN — stopping before Pay button. Screenshot saved.")
-            await page.screenshot(path="/tmp/va_dry_run_payment_page.png")
+            note("🧪 DRY RUN — stopping before payment. Screenshots in /tmp/va_step*.png")
             _notify_appa(
-                f"\U0001f9ea DRY RUN complete for booking #{booking_id}\n"
-                f"Route: {origin} \u2192 {dest} on {date}\n"
-                f"Got to payment page — stopped before Pay. Screenshot at /tmp/va_dry_run_payment_page.png"
+                f"🧪 VA DRY RUN complete\n"
+                f"Route: {origin} → {dest} | {date} | {cabin_label}\n"
+                f"Passenger: {first} {last}\n"
+                f"Reached passenger page ✅"
             )
             _update_booking(booking_id, "dry_run")
+            print("\n=== DRY RUN NOTES ===")
+            for n in notes:
+                print(f"  {n}")
             return "DRY_RUN"
 
-        print("[book_va] Clicking Pay/Book now")
-        booked = False
-        for attempt in range(3):
-            for pay_sel in [
-                "button:has-text('Pay now')",
-                "button:has-text('Confirm and pay')",
-                "button:has-text('Book now')",
-                "button:has-text('Complete booking')",
-                "button:has-text('Pay')",
-                "[data-testid='pay-button']",
-                "[data-testid='book-button']",
-            ]:
+        # ── Step 8: Continue to next step ─────────────────────────────────────
+        note("Step 8: Continuing past passenger details")
+        try:
+            cont = page.locator("button:has-text('Continue')").first
+            await cont.click(timeout=5000)
+            note("  ✅ Continue clicked")
+        except Exception as e:
+            note(f"  ⚠️ Continue error: {e}")
+
+        await page.wait_for_load_state("domcontentloaded", timeout=15000)
+        await page.wait_for_timeout(2000)
+
+        # ── Step 9: Seat selection (skip) ─────────────────────────────────────
+        note("Step 9: Skipping seat selection")
+        for skip_text in ["Skip", "No thanks", "Continue without"]:
+            try:
+                btn = page.locator(f"button:has-text('{skip_text}')").first
+                if await btn.is_visible(timeout=3000):
+                    await btn.click(timeout=3000)
+                    note(f"  Skipped seats: '{skip_text}'")
+                    break
+            except Exception:
+                pass
+
+        await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        await page.wait_for_timeout(1500)
+
+        # ── Step 10: Extras (skip) ────────────────────────────────────────────
+        note("Step 10: Skipping extras")
+        for skip_text in ["Skip", "No thanks", "Continue"]:
+            try:
+                btn = page.locator(f"button:has-text('{skip_text}')").first
+                if await btn.is_visible(timeout=3000):
+                    await btn.click(timeout=3000)
+                    note(f"  Skipped extras: '{skip_text}'")
+                    break
+            except Exception:
+                pass
+
+        await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        await page.wait_for_timeout(1500)
+        note(f"  Pre-payment URL: {page.url}")
+        await page.screenshot(path="/tmp/va_step10_payment.png")
+        note("  Screenshot: /tmp/va_step10_payment.png")
+
+        # ── Step 11: Payment ──────────────────────────────────────────────────
+        note("Step 11: Payment — filling billing details")
+
+        for sel in ["input[name='addressLine1']", "input[name='address1']", "[placeholder*='Address']"]:
+            try:
+                await page.fill(sel, BILLING["address"], timeout=3000)
+                note(f"  Billing address set")
+                break
+            except Exception:
+                continue
+
+        for sel in ["input[name='city']", "[placeholder*='City']"]:
+            try:
+                await page.fill(sel, BILLING["city"], timeout=3000)
+                note("  City set")
+                break
+            except Exception:
+                continue
+
+        for sel in ["input[name='postcode']", "input[name='zipCode']", "input[name='zip']", "[placeholder*='Zip']", "[placeholder*='Post']"]:
+            try:
+                await page.fill(sel, BILLING["zip"], timeout=3000)
+                note("  ZIP set")
+                break
+            except Exception:
+                continue
+
+        for sel in ["select[name='country']", "select[name='billingCountry']"]:
+            try:
+                await page.select_option(sel, label="United States", timeout=3000)
+                note("  Country set to US")
+                break
+            except Exception:
                 try:
-                    btn = page.locator(pay_sel).first
-                    is_disabled = await btn.is_disabled(timeout=2000)
-                    if is_disabled:
-                        print(f"[book_va] Pay button disabled (attempt {attempt+1}), waiting...")
-                        await page.wait_for_timeout(1500)
-                        continue
-                    await btn.click(timeout=8000)
-                    booked = True
-                    print(f"[book_va] Clicked pay button: {pay_sel}")
+                    await page.select_option(sel, value="US", timeout=2000)
+                    note("  Country set to US (value)")
                     break
                 except Exception:
-                    continue
-            if booked:
+                    pass
+
+        # Try selecting saved card
+        for sel in [f"button:has-text('{card_info['label']}')", f"label:has-text('{card_last4}')"]:
+            try:
+                await page.click(sel, timeout=3000)
+                note(f"  Selected saved card")
                 break
-            await page.wait_for_timeout(1500)
+            except Exception:
+                pass
+
+        # CVV
+        for sel in ["input[name='cvv']", "input[name='cvc']", "input[name='securityCode']", "[placeholder*='CVV']"]:
+            try:
+                await page.fill(sel, card_info["cvv"], timeout=3000)
+                note("  CVV set")
+                break
+            except Exception:
+                continue
+
+        # T&Cs
+        for sel in ["input[type='checkbox'][name*='term']", "input[type='checkbox'][id*='term']"]:
+            try:
+                cb = await page.query_selector(sel)
+                if cb and not await cb.is_checked():
+                    await cb.click()
+                    note("  Accepted T&Cs")
+            except Exception:
+                pass
+
+        await page.screenshot(path="/tmp/va_step11_payment_filled.png")
+        note("  Screenshot: /tmp/va_step11_payment_filled.png")
+
+        # ── Step 12: Pay ──────────────────────────────────────────────────────
+        note("Step 12: Clicking Pay now")
+        booked = False
+        for pay_text in ["Pay now", "Confirm and pay", "Book now", "Complete booking", "Pay"]:
+            try:
+                btn = page.locator(f"button:has-text('{pay_text}')").first
+                if await btn.is_visible(timeout=2000) and not await btn.is_disabled(timeout=2000):
+                    await btn.click(timeout=8000)
+                    note(f"  ✅ Clicked: '{pay_text}'")
+                    booked = True
+                    break
+            except Exception:
+                continue
 
         if not booked:
-            # Shadow DOM fallback
-            booked = await page.evaluate(f"""
-                {FIND_IN_SHADOW_JS}
-                const all = [];
-                findAllInShadow(document, 'button', all);
-                const btn = all.find(b => {{
-                    const t = b.textContent.trim().toLowerCase();
-                    return (t.includes('pay') || t.includes('book') || t.includes('confirm'))
-                        && !b.disabled;
-                }});
-                if (btn) {{ btn.click(); return true; }}
-                return false;
-            """)
+            raise Exception("Could not click Pay/Book now button")
 
-        if not booked:
-            raise Exception("Could not click Pay/Book now button after 3 attempts")
-
-        # ── Step 17: Wait for confirmation ────────────────────────────────────
-        print("[book_va] Waiting for booking confirmation...")
+        # ── Step 13: Confirmation ─────────────────────────────────────────────
+        note("Step 13: Waiting for booking confirmation")
         try:
             await page.wait_for_url("**/confirmation**", timeout=90000)
         except Exception:
-            # VA might not change URL — wait for confirmation text instead
             try:
-                await page.wait_for_selector(
-                    "text=Booking reference, text=Confirmation, text=Reference number, text=Booking number",
-                    timeout=90000,
-                )
+                await page.wait_for_selector("text=Booking reference", timeout=30000)
             except Exception:
                 pass
 
-        await page.wait_for_load_state("networkidle")
         await page.wait_for_timeout(2000)
-
-        # ── Step 18: Extract booking reference ────────────────────────────────
         content = await page.content()
-
-        # VA booking reference: 6 alphanumeric uppercase chars (e.g. "ABC123")
-        # Also look for PNR patterns
         codes = re.findall(r'\b([A-Z0-9]{6})\b', content)
-        false_positives = {
-            "VIRGIN", "ATLANT", "FLYING", "BUSINE", "SELECT", "POINTS",
-            "SEARCH", "REWARD", "FLIGHT", "TICKET", "TRAVEL", "PLEASE",
-        }
-        codes = [c for c in codes if c not in false_positives and not c.isdigit()]
+        false_pos = {"VIRGIN", "ATLANT", "FLYING", "BUSINE", "SELECT", "POINTS", "SEARCH", "REWARD"}
+        codes = [c for c in codes if c not in false_pos and not c.isdigit()]
+        confirmation = codes[0] if codes else "UNKNOWN"
+        note(f"✅ BOOKED! Ref: {confirmation}")
 
-        # Also try longer reference patterns (some VA refs are longer)
-        long_refs = re.findall(r'\b([A-Z]{2}\d{6,})\b', content)
-
-        confirmation = codes[0] if codes else (long_refs[0] if long_refs else "UNKNOWN")
-        print(f"[book_va] ✅ BOOKED! Confirmation: {confirmation}")
-        print(f"[book_va] All codes found: {codes[:5]}")
-
-        await page.screenshot(path=f"/tmp/va_booking_confirmation_{confirmation}.png")
-        print(f"[book_va] Screenshot saved to /tmp/va_booking_confirmation_{confirmation}.png")
-
-        # ── Step 19: Update vault.db ───────────────────────────────────────────
+        await page.screenshot(path=f"/tmp/va_confirmation_{confirmation}.png")
         _update_booking(booking_id, "confirmed", confirmation)
-
-        # ── Step 20: Notify Appa ───────────────────────────────────────────────
         _notify_appa(
-            f"✅ Virgin Atlantic booking confirmed!\n"
-            f"  Route: {origin} → {dest} on {date}\n"
-            f"  Passenger: {first} {last}\n"
-            f"  Cabin: {cabin_label}\n"
-            f"  Booking reference: {confirmation}"
+            f"✅ VA booking confirmed!\n"
+            f"Route: {origin}→{dest} | {date} | {cabin_label}\n"
+            f"Passenger: {first} {last}\nRef: {confirmation}"
         )
-
         return confirmation
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Book Virgin Atlantic award flight")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--origin",     required=True)
     parser.add_argument("--dest",       required=True)
-    parser.add_argument("--date",       required=True, help="YYYY-MM-DD")
+    parser.add_argument("--date",       required=True)
     parser.add_argument("--first",      required=True)
     parser.add_argument("--last",       required=True)
-    parser.add_argument("--dob",        required=True, help="YYYY-MM-DD")
-    parser.add_argument("--cabin",      default="business")
-    parser.add_argument("--card",       default="2002", help="Last 4 of card")
+    parser.add_argument("--dob",        required=True)
+    parser.add_argument("--cabin",      default="economy")
+    parser.add_argument("--card",       default="2002")
     parser.add_argument("--booking-id", default=None, type=int)
-    parser.add_argument("--dry-run",    action="store_true", help="Stop before Pay button")
+    parser.add_argument("--dry-run",    action="store_true")
     args = parser.parse_args()
 
     if args.dry_run:
         os.environ["DRY_RUN"] = "true"
 
-    booking_id = args.booking_id
-
     try:
-        confirmation = asyncio.run(book_virgin_atlantic(
-            origin     = args.origin.upper(),
-            dest       = args.dest.upper(),
-            date       = args.date,
-            first      = args.first,
-            last       = args.last,
-            dob        = args.dob,
-            cabin      = args.cabin,
-            card_last4 = args.card,
-            booking_id = booking_id,
+        result = asyncio.run(book_virgin_atlantic(
+            origin=args.origin.upper(), dest=args.dest.upper(),
+            date=args.date, first=args.first, last=args.last, dob=args.dob,
+            cabin=args.cabin, card_last4=args.card, booking_id=args.booking_id,
         ))
-        print(json.dumps({"confirmation": confirmation, "status": "confirmed"}))
-
+        print(json.dumps({"confirmation": result, "status": "confirmed" if result != "DRY_RUN" else "dry_run"}))
     except Exception as e:
-        err_msg = str(e)
-        print(f"[book_va] ❌ FAILED: {err_msg}", file=sys.stderr)
-
-        # Mark booking failed in DB
-        _update_booking(booking_id, "failed")
-
-        # Notify Appa of failure
-        _notify_appa(
-            f"❌ Virgin Atlantic booking FAILED!\n"
-            f"  Booking ID: {booking_id}\n"
-            f"  Error: {err_msg}"
-        )
-
+        print(f"[book_va] ❌ FAILED: {e}", file=sys.stderr)
         sys.exit(1)
 
 
