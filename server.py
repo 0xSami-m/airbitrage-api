@@ -1569,8 +1569,8 @@ def handle_booking_status(booking_id: int) -> tuple[dict, int]:
         if not row:
             return {"error": "Booking not found"}, 404
         d = dict(row)
-        if d.get("status") == "confirmed" and d.get("aeroplan_ref"):
-            d["confirmation_number"] = d["aeroplan_ref"]
+        if d.get("status") == "confirmed" and d.get("airline_ref"):
+            d["confirmation_number"] = d["airline_ref"]
         return d, 200
     except Exception as e:
         return {"error": str(e)}, 500
@@ -1946,7 +1946,7 @@ class Handler(BaseHTTPRequestHandler):
                 conn.commit()
                 booking_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                 # Store full bdata as JSON in the booking row for later retrieval
-                conn.execute("UPDATE bookings SET aeroplan_ref=? WHERE id=?",
+                conn.execute("UPDATE bookings SET airline_ref=? WHERE id=?",
                              (json.dumps(bdata), booking_id))
                 conn.commit()
                 conn.close()
@@ -2003,7 +2003,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Booking not found"}, 404)
                 return
 
-            # Parse stored bdata from aeroplan_ref column (we stash JSON there temporarily)
+            # Parse stored bdata from airline_ref column (we stash JSON there temporarily)
             cols = [d[0] for d in conn.execute("PRAGMA table_info(bookings)").fetchall()]
             row_dict = dict(zip(cols, row))
 
@@ -2021,7 +2021,7 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
 
             try:
-                stored = json.loads(row_dict.get("aeroplan_ref", "{}"))
+                stored = json.loads(row_dict.get("airline_ref", "{}"))
             except Exception:
                 stored = {}
 

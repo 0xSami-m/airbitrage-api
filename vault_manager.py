@@ -23,7 +23,7 @@ bookings:
     vault_id        INTEGER FK → vault_accounts.id
     passenger_name  TEXT
     flight_ref      TEXT        -- seats.aero availability id
-    aeroplan_ref    TEXT        -- Aeroplan booking reference
+    airline_ref    TEXT        -- Aeroplan booking reference
     miles_used      INTEGER
     taxes_paid      REAL
     status          TEXT        -- 'pending' | 'confirmed' | 'failed'
@@ -67,7 +67,7 @@ def init_db():
                 vault_id        INTEGER NOT NULL REFERENCES vault_accounts(id),
                 passenger_name  TEXT,
                 flight_ref      TEXT,
-                aeroplan_ref    TEXT,
+                airline_ref    TEXT,
                 miles_used      INTEGER DEFAULT 0,
                 taxes_paid      REAL DEFAULT 0,
                 status          TEXT DEFAULT 'pending',
@@ -171,7 +171,7 @@ def create_booking(vault_id: int, passenger_name: str, flight_ref: str, miles_us
         return cur.lastrowid
 
 
-def confirm_booking(booking_id: int, aeroplan_ref: str, actual_miles_used: int):
+def confirm_booking(booking_id: int, airline_ref: str, actual_miles_used: int):
     """Mark a booking confirmed and deduct miles from vault."""
     with _conn() as c:
         row = c.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
@@ -179,8 +179,8 @@ def confirm_booking(booking_id: int, aeroplan_ref: str, actual_miles_used: int):
             raise ValueError(f"Booking {booking_id} not found")
 
         c.execute(
-            "UPDATE bookings SET status='confirmed', aeroplan_ref=?, miles_used=? WHERE id=?",
-            (aeroplan_ref, actual_miles_used, booking_id),
+            "UPDATE bookings SET status='confirmed', airline_ref=?, miles_used=? WHERE id=?",
+            (airline_ref, actual_miles_used, booking_id),
         )
         # Deduct miles from vault
         c.execute(
@@ -192,7 +192,7 @@ def confirm_booking(booking_id: int, aeroplan_ref: str, actual_miles_used: int):
         if vault and vault["miles_balance"] < LOW_BALANCE_THRESHOLD:
             c.execute("UPDATE vault_accounts SET status='low' WHERE id=?", (row["vault_id"],))
 
-    print(f"[vault] Booking {booking_id} confirmed (ref: {aeroplan_ref}), {actual_miles_used:,} miles deducted")
+    print(f"[vault] Booking {booking_id} confirmed (ref: {airline_ref}), {actual_miles_used:,} miles deducted")
 
 
 def fail_booking(booking_id: int, reason: str = ""):

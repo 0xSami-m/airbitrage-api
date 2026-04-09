@@ -1601,8 +1601,8 @@ def api_booking_status(booking_id):
             return jsonify({"error": "Booking not found"}), 404
         d = dict(row)
         # Expose confirmation_number for frontend polling
-        if d.get("status") == "confirmed" and d.get("aeroplan_ref"):
-            d["confirmation_number"] = d["aeroplan_ref"]
+        if d.get("status") == "confirmed" and d.get("airline_ref"):
+            d["confirmation_number"] = d["airline_ref"]
         return jsonify(d)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1646,7 +1646,7 @@ def _init_users_table():
             miles_used     INTEGER DEFAULT 0,
             taxes_paid     REAL DEFAULT 0.0,
             status         TEXT DEFAULT 'pending',
-            aeroplan_ref   TEXT,
+            airline_ref   TEXT,
             flyai_ref      TEXT,
             enrichment     TEXT,
             created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -1869,7 +1869,7 @@ def api_book_complete():
     booking_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     # Stash full payload + enrichment for retrieval on approval/polling
     conn.execute(
-        "UPDATE bookings SET aeroplan_ref=?, flyai_ref=?, enrichment=? WHERE id=?",
+        "UPDATE bookings SET airline_ref=?, flyai_ref=?, enrichment=? WHERE id=?",
         (_json.dumps({**data, "flight": flight, "client": client}),
          flyai_ref, _json.dumps(enrichment), booking_id)
     )
@@ -1924,7 +1924,7 @@ def api_booking_approve():
 
     stored = {}
     try:
-        stored = _json.loads(row["aeroplan_ref"] or "{}")
+        stored = _json.loads(row["airline_ref"] or "{}")
     except Exception:
         pass
 
