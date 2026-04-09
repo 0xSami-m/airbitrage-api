@@ -1255,7 +1255,7 @@ _maybe_startup_refresh()
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "service": "flight-search-api", "version": "2.0"})
+    return jsonify({"status": "ok", "service": "flight-search-api", "version": "2.1", "commit": "20c8ed0"})
 
 
 @app.route("/api/seats-usage")
