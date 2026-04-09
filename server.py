@@ -13,7 +13,56 @@ load_dotenv()
 
 from fast_flights import FlightData, Passengers, get_flights as gf_get_flights
 
-SEATS_AERO_KEY = "pro_34HzjB9LzH46xVzkZz0HeJWekiv"
+# ── seats.aero key rotation ──────────────────────────────────────────────────
+# Keys are tried in order; on 429 the active key is advanced and Appa is notified.
+SEATS_AERO_KEYS = [
+    os.environ.get("SEATS_AERO_KEY",  "pro_3C3BUt7QiVMzBPN3fwxfU7UCqYc"),  # key 4 (primary)
+    os.environ.get("SEATS_AERO_KEY2", "pro_3C0ux62nhQbmMyfWjY7yhmDaQW3"),   # key 1
+    os.environ.get("SEATS_AERO_KEY3", "pro_3C1rKk9tlTB4RAddENHbhkUKqN3"),   # key 2
+    os.environ.get("SEATS_AERO_KEY4", "pro_34HzjB9LzH46xVzkZz0HeJWekiv"),   # key 3
+]
+_active_key_index = 0  # mutable index into SEATS_AERO_KEYS
+
+def _active_key():
+    return SEATS_AERO_KEYS[_active_key_index]
+
+def _rotate_key():
+    """Advance to the next key and notify Appa via hook. Returns new key or None if exhausted."""
+    global _active_key_index
+    old_index = _active_key_index
+    old_key   = SEATS_AERO_KEYS[old_index]
+    next_index = old_index + 1
+    if next_index >= len(SEATS_AERO_KEYS):
+        _notify_appa(f"\u26a0\ufe0f seats.aero ALL KEYS EXHAUSTED (rate-limited). Key {old_index+1}/{len(SEATS_AERO_KEYS)} was last. Manual action needed.")
+        return None
+    _active_key_index = next_index
+    new_key = SEATS_AERO_KEYS[next_index]
+    _notify_appa(
+        f"\u26a0\ufe0f seats.aero key rotated: key {old_index+1} ({old_key[:12]}...) hit rate limit. "
+        f"Now using key {next_index+1}/{len(SEATS_AERO_KEYS)} ({new_key[:12]}...). "
+        f"{len(SEATS_AERO_KEYS) - next_index - 1} fallback(s) remaining."
+    )
+    return new_key
+
+def _notify_appa(text: str):
+    """POST a wake event to Appa's hook so it can relay alerts to Telegram."""
+    hook_url  = os.environ.get("APPA_HOOK_URL", "https://hooks.airbitrage.io/hooks/wake")
+    hook_token = os.environ.get("APPA_HOOK_TOKEN", "flightdash-hook-token-2026")
+    payload = json.dumps({"text": text}).encode()
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            hook_url,
+            data=payload,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {hook_token}"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception as e:
+        print(f"[notify_appa] failed: {e}")
+
+# Legacy single-key alias (used in a few places below)
+SEATS_AERO_KEY = property(lambda self: _active_key())  # noqa – overridden per-call
 BASE_URL        = "https://seats.aero/partnerapi/search"
 TRIPS_URL       = "https://seats.aero/partnerapi/trips"
 
@@ -277,6 +326,21 @@ _IATA_TO_GF_NAME = {
 }
 
 
+# Airlines to exclude from cash price comparisons — budget/low-cost carriers
+# that skew the savings calculation (a $200 Norse fare isn't comparable to a
+# $3,000 Lufthansa First award).
+_EXCLUDED_CARRIER_NAMES = {
+    "norse", "norse atlantic",
+    "frontier",
+    "icelandair",
+    "azores", "sata",
+}
+
+def _is_excluded_carrier(gf_name: str) -> bool:
+    """Return True if this Google Flights airline name should be excluded from cash price results."""
+    name_lower = gf_name.lower()
+    return any(excl in name_lower for excl in _EXCLUDED_CARRIER_NAMES)
+
 def _airlines_match(gf_name, iata_codes):
     """Return True if gf_name matches any of the IATA codes."""
     gf_lower = gf_name.lower()
@@ -323,6 +387,9 @@ def fetch_cash_price(origin, dest, date, cabin, airlines=None, direct=None):
         for f in (result.flights or []):
             # Filter by stops
             if direct and f.stops != 0:
+                continue
+            # Skip excluded budget/low-cost carriers
+            if _is_excluded_carrier(f.name):
                 continue
             # Filter by airline
             if airlines and not _airlines_match(f.name, airlines):
@@ -399,18 +466,32 @@ def kayak_url(origin, destination, date, cabin="business", direct=False):
 
 # ── seats.aero helpers ─────────────────────────────────────────────────────────
 def curl_get(url):
-    result = subprocess.run(
-        ["curl", "-s", "--max-time", "30", url,
-         "-H", f"Partner-Authorization: {SEATS_AERO_KEY}",
-         "-H", "accept: application/json"],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        return None
-    try:
-        return json.loads(result.stdout)
-    except Exception:
-        return None
+    """Fetch a seats.aero URL, rotating the API key on 429."""
+    for attempt in range(len(SEATS_AERO_KEYS)):
+        key = _active_key()
+        result = subprocess.run(
+            ["curl", "-s", "--max-time", "30", "-w", "\n%{http_code}", url,
+             "-H", f"Partner-Authorization: {key}",
+             "-H", "accept: application/json"],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            return None
+        # Last line is the HTTP status code
+        lines = result.stdout.rsplit("\n", 1)
+        body  = lines[0]
+        status = lines[1].strip() if len(lines) > 1 else "0"
+        if status == "429":
+            print(f"[seats.aero] 429 rate-limit on key {_active_key_index+1}, rotating...")
+            rotated = _rotate_key()
+            if rotated is None:
+                return None  # all keys exhausted
+            continue
+        try:
+            return json.loads(body)
+        except Exception:
+            return None
+    return None
 
 
 def fetch_trips(availability_id, direct_only=False, carriers_filter=None):
@@ -460,7 +541,7 @@ def fetch_trips(availability_id, direct_only=False, carriers_filter=None):
 
         results.append({
             "trip_id":            trip.get("ID", ""),
-            "cabin":              trip.get("Cabin", ""),
+            "cabin":              normalize_cabin(trip.get("Cabin", "")),
             "miles":              trip.get("MileageCost", 0),
             "taxes_raw":          trip.get("TotalTaxes", 0),
             "taxes_currency":     trip.get("TaxesCurrency", "USD"),
@@ -480,11 +561,38 @@ def taxes_to_usd(raw, currency):
     return (raw / 100) * TAX_FX.get(currency, 1.0)
 
 
+# Normalize seats.aero cabin codes to standard frontend values
+_CABIN_NORM = {
+    "first":    "first",   "f": "first",
+    "business": "business", "j": "business", "c": "business", "d": "business", "i": "business",
+    "premium":  "premium",  "w": "premium",  "s": "premium",
+    "economy":  "economy",  "y": "economy",  "m": "economy",  "b": "economy",
+                             "h": "economy",  "k": "economy",  "l": "economy",
+                             "q": "economy",  "t": "economy",  "v": "economy",
+                             "x": "economy",  "n": "economy",
+}
+
+def normalize_cabin(cabin: str) -> str:
+    if not cabin:
+        return "economy"
+    return _CABIN_NORM.get(cabin.lower(), cabin.lower())
+
+
+# Programs we support buying miles for and will show results for.
+# Any seats.aero source not in this list is excluded from search results.
+ALLOWED_PROGRAMS = {"aeroplan", "alaska", "american", "virginatlantic", "flyingblue"}
+
+
 def search_seats_aero(origins, destinations, date_from, date_to, cabins, programs):
     origin_str  = ",".join(origins) if isinstance(origins, list) else origins
     dest_str    = ",".join(destinations) if isinstance(destinations, list) else destinations
     cabin_str   = ",".join(cabins) if isinstance(cabins, list) else cabins
-    sources_str = ",".join(programs) if programs else ",".join(BUY_MILES_INFO.keys())
+    # If caller passes programs, intersect with allowed list; otherwise use all allowed
+    if programs:
+        effective = [p for p in programs if p in ALLOWED_PROGRAMS]
+    else:
+        effective = list(ALLOWED_PROGRAMS)
+    sources_str = ",".join(effective) if effective else ",".join(ALLOWED_PROGRAMS)
 
     url = (
         f"{BASE_URL}"
@@ -502,21 +610,43 @@ def search_seats_aero(origins, destinations, date_from, date_to, cabins, program
 
 
 def score_row(row, cabin_pref):
-    source   = row.get("Source", "")
-    info     = BUY_MILES_INFO.get(source, {})
-    rate     = info.get("standard_cpp_usd", 2.0)
-    promo_rate = info.get("promo_cpp_usd", rate * 0.65)
-    route    = row.get("Route", {})
-    currency = row.get("TaxesCurrency", "USD")
-    distance = route.get("Distance", 0)
+    """
+    Score a seats.aero row for all applicable cabins.
 
-    cabin_map = [("first","F"), ("business","J"), ("premium","W"), ("economy","Y")]
+    cabin_pref controls which cabins are returned:
+      - "economy"  → economy only
+      - "business" → business + economy (economy always shown as upsell/context)
+      - "first"    → first + business + economy
+      - "premium"  → premium + economy
+      - "any"/None → all four cabins
+
+    Returns a list of scored deal dicts (may be empty). Callers must flatten.
+    """
+    source     = row.get("Source", "")
+    info       = BUY_MILES_INFO.get(source, {})
+    rate       = info.get("standard_cpp_usd", 2.0)
+    # Always use CURRENT_PROMO_CPP as the single source of truth for displayed price
+    promo_rate = CURRENT_PROMO_CPP.get(source, info.get("promo_cpp_usd", rate * 0.65))
+    route      = row.get("Route", {})
+    currency   = row.get("TaxesCurrency", "USD")
+    distance   = route.get("Distance", 0)
+
+    # Determine which cabins to score.
+    # For "business" searches we always also include economy so users see the
+    # cheaper option without having to run a separate search.
+    CABIN_ORDER = [("first","F"), ("business","J"), ("premium","W"), ("economy","Y")]
+    cabin_sets = {
+        "first":    [("first","F"), ("business","J"), ("premium","W"), ("economy","Y")],
+        "business": [("business","J"), ("economy","Y")],
+        "premium":  [("premium","W"), ("economy","Y")],
+        "economy":  [("economy","Y")],
+    }
     if cabin_pref and cabin_pref != "any":
-        check = [{"first":("first","F"),"business":("business","J"),
-                  "premium":("premium","W"),"economy":("economy","Y")}.get(cabin_pref, ("business","J"))]
+        check = cabin_sets.get(cabin_pref, [("business","J"), ("economy","Y")])
     else:
-        check = cabin_map
+        check = CABIN_ORDER
 
+    results = []
     for cabin_name, prefix in check:
         if not row.get(f"{prefix}Available"):
             continue
@@ -524,84 +654,77 @@ def score_row(row, cabin_pref):
         if miles <= 0:
             continue
 
-        taxes_usd    = taxes_to_usd(row.get(f"{prefix}TotalTaxesRaw", 0), currency)
-        buy_usd      = (miles * rate) / 100
-        buy_promo    = (miles * promo_rate) / 100
-        total_usd    = buy_usd + taxes_usd
-        total_promo  = buy_promo + taxes_usd
+        taxes_usd   = taxes_to_usd(row.get(f"{prefix}TotalTaxesRaw", 0), currency)
+        buy_usd     = (miles * rate) / 100
+        buy_promo   = (miles * promo_rate) / 100
+        total_usd   = buy_usd + taxes_usd
+        total_promo = buy_promo + taxes_usd
 
-        # Use real Google Flights cash price if it was pre-fetched into the cache
-        orig_code    = route.get("OriginAirport", "")
-        dest_code    = route.get("DestinationAirport", "")
-        date_str     = row.get("Date", "")
-        is_direct    = bool(row.get(f"{prefix}Direct", False))
+        orig_code     = route.get("OriginAirport", "")
+        dest_code     = route.get("DestinationAirport", "")
+        date_str      = row.get("Date", "")
+        is_direct     = bool(row.get(f"{prefix}Direct", False))
         airline_codes = [a.strip() for a in (row.get(f"{prefix}AirlinesRaw") or "").split(",") if a.strip()]
         airlines_key  = tuple(sorted(a.upper() for a in airline_codes)) if airline_codes else ()
         cache_key     = (orig_code, dest_code, date_str, cabin_name, airlines_key, is_direct)
         cache_hit     = _cash_price_cache.get(cache_key)
         cash_est      = cache_hit[0] if (cache_hit and cache_hit[0] is not None) else None
         cash_est_source = "google_flights" if cash_est is not None else "unavailable"
-        if cash_est is None:
-            cash_est = 0  # no estimate — savings/ratio will be None in output
 
         savings = round(cash_est - total_usd, 0) if cash_est else None
         ratio   = round(cash_est / total_usd, 2)  if (cash_est and total_usd > 0) else None
 
         buy_info = {
-            "program_name":       info.get("program_name", source),
-            "logo_url":           info.get("logo_url", ""),
-            "buy_url":            info.get("buy_url", ""),
-            "standard_cpp_usd":   rate,
-            "promo_cpp_usd":      promo_rate,
-            "typical_promo_bonus":info.get("typical_promo_bonus", 40),
-            "currency":           info.get("currency", "USD"),
-            "min_purchase":       info.get("min_purchase", 1000),
-            "max_purchase":       info.get("max_purchase", 150000),
-            "notes":              info.get("notes", ""),
-            "cost_at_standard":   round(buy_usd, 2),
-            "cost_at_promo":      round(buy_promo, 2),
-            "total_at_standard":  round(total_usd, 2),
-            "total_at_promo":     round(total_promo, 2),
+            "program_name":        info.get("program_name", source),
+            "logo_url":            info.get("logo_url", ""),
+            "buy_url":             info.get("buy_url", ""),
+            "standard_cpp_usd":    rate,
+            "promo_cpp_usd":       promo_rate,
+            "typical_promo_bonus": info.get("typical_promo_bonus", 40),
+            "currency":            info.get("currency", "USD"),
+            "min_purchase":        info.get("min_purchase", 1000),
+            "max_purchase":        info.get("max_purchase", 150000),
+            "notes":               info.get("notes", ""),
+            "cost_at_standard":    round(buy_usd, 2),
+            "cost_at_promo":       round(buy_promo, 2),
+            "total_at_standard":   round(total_usd, 2),
+            "total_at_promo":      round(total_promo, 2),
         }
 
-        # Build per-carrier logos for the airlines string on this result
-        airline_codes = [a.strip() for a in (row.get(f"{prefix}AirlinesRaw") or "").split(",") if a.strip()]
         carrier_logos = {code: CARRIER_LOGOS[code] for code in airline_codes if code in CARRIER_LOGOS}
 
-        return {
-            "availability_id":  row.get("ID", ""),
-            "date":             row.get("Date", ""),
-            "origin":           route.get("OriginAirport", ""),
-            "destination":      route.get("DestinationAirport", ""),
-            "distance_miles":   distance,
-            "program":          source,
-            "program_name":     info.get("program_name", source),
-            "cabin":            cabin_name,
-            "miles":            miles,
-            "taxes_usd":        round(taxes_usd, 2),
-            "arb_miles_cost_usd":       round(buy_usd, 2),    # cost of miles only (standard rate)
-            "arb_miles_cost_promo_usd": round(buy_promo, 2),  # cost of miles only (promo rate)
-            "arb_price_usd":            round(total_usd, 2),  # arb: miles (standard) + taxes
-            "arb_price_promo_usd":      round(total_promo, 2),# arb: miles (promo) + taxes
-            "cash_price_usd":    cash_est if cash_est else None,
-            "cash_price_source": cash_est_source,
-            "savings_usd":   savings,
-            "value_ratio":       ratio,
-            "airlines":           row.get(f"{prefix}AirlinesRaw", ""),
-            "carrier_logos":      carrier_logos,
-            "program_logo_url":   info.get("logo_url", ""),
-            "direct":             bool(row.get(f"{prefix}Direct", False)),
-            "remaining_seats":    row.get(f"{prefix}RemainingSeats", 0),
-            "taxes_currency":     currency,
-            "buy_miles_info":     buy_info,
-            "google_flights_url": google_flights_url_simple(
-                route.get("OriginAirport",""), route.get("DestinationAirport",""),
-                row.get("Date",""), cabin_name, bool(row.get(f"{prefix}Direct", False))),
-            "kayak_url": kayak_url(
-                route.get("OriginAirport",""), route.get("DestinationAirport",""),
-                row.get("Date",""), cabin_name, bool(row.get(f"{prefix}Direct", False))),
-        }
-    return None
+        results.append({
+            "availability_id":          row.get("ID", ""),
+            "date":                     row.get("Date", ""),
+            "origin":                   orig_code,
+            "destination":              dest_code,
+            "distance_miles":           distance,
+            "program":                  source,
+            "program_name":             info.get("program_name", source),
+            "cabin":                    cabin_name,
+            "miles":                    miles,
+            "taxes_usd":                round(taxes_usd, 2),
+            "arb_miles_cost_usd":       round(buy_usd, 2),
+            "arb_miles_cost_promo_usd": round(buy_promo, 2),
+            "arb_price_usd":            round(total_usd, 2),
+            "arb_price_promo_usd":      round(total_promo, 2),
+            "cash_price_usd":           cash_est if cash_est else None,
+            "cash_price_source":        cash_est_source,
+            "savings_usd":              savings,
+            "value_ratio":              ratio,
+            "airlines":                 row.get(f"{prefix}AirlinesRaw", ""),
+            "carrier_logos":            carrier_logos,
+            "program_logo_url":         info.get("logo_url", ""),
+            "direct":                   is_direct,
+            "remaining_seats":          row.get(f"{prefix}RemainingSeats", 0),
+            "taxes_currency":           currency,
+            "buy_miles_info":           buy_info,
+            "google_flights_url":       google_flights_url_simple(
+                orig_code, dest_code, date_str, cabin_name, is_direct),
+            "kayak_url":                kayak_url(
+                orig_code, dest_code, date_str, cabin_name, is_direct),
+        })
+    return results
 
 
 # ── Discover endpoint data ────────────────────────────────────────────────────
@@ -638,18 +761,37 @@ REGION_MAP = {
 }
 
 # Current promo buy rates (cents per mile) — update when promos change
-CURRENT_PROMO_CPP = {
-    "aeroplan":       1.44,  # 90% bonus active through ~Mar 19
-    "alaska":         1.98,  # up to 90% bonus active through ~Mar 18
-    "american":       2.26,  # 40% discount (evergreen)
-    "virginatlantic": 1.47,  # 70% bonus active through Mar 31
-    "delta":          2.50,
-    "flyingblue":     2.00,
-    "united":         2.00,
-    "singapore":      1.80,
-    "etihad":         1.80,
-    "lufthansa":      1.70,
-}
+# ⚠️ Vault actual costs (Apr 3 2026): Aeroplan=1.49¢, Alaska=1.88125¢, Virgin=1.18¢
+# Cents-per-point rates used for ALL price display (search + discover).
+# Pulled from vault_accounts.cost_per_point_cents — actual cost paid per program.
+# Fallback values used for programs not in the vault.
+def _load_cpp_from_vault():
+    import sqlite3, os
+    defaults = {
+        "aeroplan":       1.49,
+        "alaska":         1.88125,
+        "virginatlantic": 1.18,
+        "american":       2.26,
+        "flyingblue":     2.00,
+        "delta":          2.50,
+        "united":         2.00,
+        "singapore":      1.80,
+        "etihad":         1.80,
+        "lufthansa":      1.70,
+    }
+    try:
+        db = os.path.join(os.path.dirname(__file__), "vault.db")
+        conn = sqlite3.connect(db)
+        rows = conn.execute("SELECT program, cost_per_point_cents FROM vault_accounts WHERE status='active'").fetchall()
+        conn.close()
+        for program, cpp in rows:
+            if program and cpp:
+                defaults[program] = float(cpp)
+    except Exception as e:
+        print(f"[cpp] Could not load vault CPP: {e}")
+    return defaults
+
+CURRENT_PROMO_CPP = _load_cpp_from_vault()
 
 # Route batches to scan for discover tiles (broad sweeps)
 DISCOVER_SEARCHES = [
@@ -658,13 +800,13 @@ DISCOVER_SEARCHES = [
      "aeroplan,alaska,american,virginatlantic", "business,first"),
     # Asia → Europe  (SIN/NRT/ICN/DEL/BOM → Europe)
     ("SIN,HKG,NRT,ICN,BKK,DEL,BOM", "LHR,CDG,FRA,ZRH,AMS,FCO",
-     "aeroplan,alaska,american,lufthansa,etihad", "business,first"),
+     "aeroplan,alaska,american,flyingblue", "business,first"),
     # Tokyo outbound  (JL First sweet spot)
     ("HND,NRT", "BKK,SIN,PVG,ICN,HKG,SYD,LAX,JFK,ORD,LHR",
      "american,aeroplan,alaska", "business,first"),
     # Middle East → Europe
     ("DXB,DOH,AUH,RUH,CAI,AMM", "LHR,CDG,FRA,ZRH,FCO,ARN",
-     "alaska,aeroplan,american,lufthansa", "business"),
+     "alaska,aeroplan,american,flyingblue", "business"),
     # Intra-Asia
     ("ICN,HKG,NRT,SIN,BKK,DEL", "NRT,SIN,HKG,BKK,SYD,MEL",
      "alaska,aeroplan,american", "business,first"),
@@ -686,7 +828,36 @@ PINNED_SEARCHES = [
 ]
 
 _discover_cache = {"tiles": [], "ts": 0.0}
-DISCOVER_TTL = 3600  # refresh once per hour
+# Discover is refreshed once daily via cron (POST /api/discover/refresh).
+# TTL is a fallback safety net — not the primary refresh mechanism.
+# Set DISCOVER_TTL_SECONDS=86400 on Railway.
+DISCOVER_TTL = int(os.environ.get("DISCOVER_TTL_SECONDS", 86400))
+DISCOVER_CACHE_FILE = os.environ.get("DISCOVER_CACHE_FILE", "/tmp/discover_cache.json")
+DISCOVER_REFRESH_TOKEN = os.environ.get("DISCOVER_REFRESH_TOKEN", "discover-refresh-token-2026")
+BOOKING_APPROVE_TOKEN = os.environ.get("BOOKING_APPROVE_TOKEN", "booking-approve-token-2026")
+KILL_TOKEN             = os.environ.get("KILL_TOKEN", "kill-switch-token-2026")
+
+def _load_discover_cache_from_disk():
+    """Load persisted discover cache on startup. Ignore if > 24h old."""
+    try:
+        with open(DISCOVER_CACHE_FILE, "r") as f:
+            saved = json.load(f)
+        age = time.time() - saved.get("ts", 0)
+        if age < 86400 and saved.get("tiles"):
+            _discover_cache["tiles"] = saved["tiles"]
+            _discover_cache["ts"]    = saved["ts"]
+            print(f"[discover] loaded {len(saved['tiles'])} tiles from disk cache (age {int(age/60)}m)")
+    except Exception:
+        pass  # no cache file yet, that's fine
+
+def _save_discover_cache_to_disk(tiles):
+    """Persist discover cache to disk so Railway restarts don't burn quota."""
+    try:
+        with open(DISCOVER_CACHE_FILE, "w") as f:
+            json.dump({"tiles": tiles, "ts": time.time()}, f)
+        print(f"[discover] saved {len(tiles)} tiles to disk cache")
+    except Exception as e:
+        print(f"[discover] warning: could not save cache to disk: {e}")
 
 
 def build_discover_tiles():
@@ -738,6 +909,9 @@ def build_discover_tiles():
                 pinned_ids.add(r.get("ID", ""))
             all_rows.extend(rows)
         time.sleep(0.3)
+
+    # ── Filter to ALLOWED_PROGRAMS only ─────────────────────────────────────────
+    all_rows = [r for r in all_rows if r.get("Source", "") in ALLOWED_PROGRAMS]
 
     # ── First pass: find the best (lowest miles) candidate per key ──────────────
     best = {}
@@ -884,13 +1058,96 @@ def handle_discover():
     now = time.time()
     if _discover_cache["tiles"] and (now - _discover_cache["ts"]) < DISCOVER_TTL:
         return {"tiles": _discover_cache["tiles"]}, 200
+    # Cache is stale/empty but no active refresh — return empty rather than
+    # burning API quota. Use POST /api/discover/refresh to populate.
+    print("[discover] cache empty/stale, returning empty (use /api/discover/refresh to populate)")
+    return {"tiles": _discover_cache["tiles"]}, 200
+
+def handle_discover_refresh(token):
+    """Force a discover rebuild. Called by daily cron. Requires token auth."""
+    if token != DISCOVER_REFRESH_TOKEN:
+        return {"error": "unauthorized"}, 401
+    print("[discover] refresh triggered")
     tiles = build_discover_tiles()
     _discover_cache["tiles"] = tiles
-    _discover_cache["ts"]    = now
-    return {"tiles": tiles}, 200
+    _discover_cache["ts"]    = time.time()
+    _save_discover_cache_to_disk(tiles)
+    return {"ok": True, "tiles": len(tiles)}, 200
 
 
 # ── Request handlers ───────────────────────────────────────────────────────────
+def _score_rows(rows, cabin_pref):
+    """Score a list of raw seats.aero rows, prefetch cash prices, return deduped deals list."""
+    cabin_lookup = {
+        "first": [("first", "F")], "business": [("business", "J")],
+        "premium": [("premium", "W")], "economy": [("economy", "Y")],
+    }
+    cabin_iters = cabin_lookup.get(cabin_pref, [("first","F"),("business","J"),("premium","W"),("economy","Y")])
+
+    combos = set()
+    for row in rows:
+        route = row.get("Route", {})
+        orig  = route.get("OriginAirport", "")
+        dest  = route.get("DestinationAirport", "")
+        date  = row.get("Date", "")
+        for cabin_name, prefix in cabin_iters:
+            if row.get(f"{prefix}Available") and int(row.get(f"{prefix}MileageCost") or 0) > 0:
+                airline_codes = [a.strip() for a in (row.get(f"{prefix}AirlinesRaw") or "").split(",") if a.strip()]
+                is_direct     = bool(row.get(f"{prefix}Direct", False))
+                combos.add((orig, dest, date, cabin_name,
+                            tuple(sorted(a.upper() for a in airline_codes)) if airline_codes else None,
+                            is_direct))
+
+    combos_list = list(combos)[:40]
+    if combos_list:
+        print(f"[search] fetching {len(combos_list)} cash prices from Google Flights...")
+        prefetch_cash_prices(combos_list)
+
+    deals, seen = [], set()
+    for row in rows:
+        for d in score_row(row, cabin_pref):
+            key = (d["origin"], d["destination"], d["program"], d["cabin"], d["date"])
+            if key in seen:
+                continue
+            seen.add(key)
+            deals.append(d)
+
+    deals.sort(key=lambda x: (not x["direct"], x["arb_price_usd"]))
+    return deals
+
+
+def _flex_date_search(origins, destinations, date_from, cabin, cabin_api_map, programs,
+                      target_price, flex_days=3, price_threshold=1.5):
+    """
+    Search ±flex_days around date_from. Return deals whose arb_price_usd is
+    at least (1/price_threshold) of target_price — i.e. meaningfully cheaper.
+    Each returned deal gets alt_date=True.
+    Returns (deals_list, flex_date_from, flex_date_to).
+    """
+    import datetime
+    base = datetime.date.fromisoformat(date_from)
+    flex_start = (base - datetime.timedelta(days=flex_days)).strftime("%Y-%m-%d")
+    flex_end   = (base + datetime.timedelta(days=flex_days)).strftime("%Y-%m-%d")
+
+    cabins_str = cabin_api_map.get(cabin, "business")
+    rows = search_seats_aero(origins, destinations, flex_start, flex_end, cabins_str, programs)
+    cabin_pref = cabin if cabin != "any" else None
+    all_deals = _score_rows(rows, cabin_pref)
+
+    # Exclude the original date (already tried), keep only genuinely cheaper ones
+    threshold_price = target_price / price_threshold  # price must be <= this to qualify
+    alt_deals = []
+    for d in all_deals:
+        if d["date"] == date_from:
+            continue
+        if d["arb_price_usd"] <= threshold_price:
+            d["alt_date"] = True
+            alt_deals.append(d)
+
+    alt_deals.sort(key=lambda x: (not x["direct"], x["arb_price_usd"]))
+    return alt_deals, flex_start, flex_end
+
+
 def handle_search(body):
     origins      = body.get("origin", [])
     destinations = body.get("destination", [])
@@ -912,69 +1169,215 @@ def handle_search(body):
         "premium economy": "premium", "business": "business",
         "first": "first", "any": "economy,premium,business,first",
     }
-    cabins_str = cabin_api_map.get(cabin, "business")
-
-    rows = search_seats_aero(origins, destinations, date_from, date_to, cabins_str, programs)
-
-    # ── Pre-score pass: extract unique (origin, dest, date, cabin) combos ─────
-    cabin_pref = cabin if cabin != "any" else None
-    cabin_lookup = {
-        "first": [("first", "F")], "business": [("business", "J")],
-        "premium": [("premium", "W")], "economy": [("economy", "Y")],
+    # Fallback chain: if no results in requested cabin, step down to cheaper cabins
+    CABIN_FALLBACK = {
+        "first":    ["first", "business", "premium", "economy"],
+        "business": ["business", "premium", "economy"],
+        "premium":  ["premium", "economy"],
+        "economy":  ["economy"],
+        "any":      ["any"],
     }
-    cabin_iters = cabin_lookup.get(cabin_pref, [("first","F"),("business","J"),("premium","W"),("economy","Y")])
+    cabin_fallback_chain = CABIN_FALLBACK.get(cabin, ["business", "economy"])
 
-    combos = set()
-    for row in rows:
-        route = row.get("Route", {})
-        orig  = route.get("OriginAirport", "")
-        dest  = route.get("DestinationAirport", "")
-        date  = row.get("Date", "")
-        for cabin_name, prefix in cabin_iters:
-            if row.get(f"{prefix}Available") and int(row.get(f"{prefix}MileageCost") or 0) > 0:
-                airline_codes = [a.strip() for a in (row.get(f"{prefix}AirlinesRaw") or "").split(",") if a.strip()]
-                is_direct     = bool(row.get(f"{prefix}Direct", False))
-                combos.add((orig, dest, date, cabin_name,
-                            tuple(sorted(a.upper() for a in airline_codes)) if airline_codes else None,
-                            is_direct))
+    cabin_pref = cabin if cabin != "any" else None
+    cabin_fallback_info = None
+    deals = []
+    effective_cabin = cabin  # the cabin we actually found results for
 
-    # ── Prefetch real cash prices from Google Flights (capped at 40 combos) ───
-    combos_list = list(combos)[:40]
-    if combos_list:
-        print(f"[search] fetching {len(combos_list)} cash prices from Google Flights...")
-        prefetch_cash_prices(combos_list)
+    for try_cabin in cabin_fallback_chain:
+        cabins_str = cabin_api_map.get(try_cabin, try_cabin)
+        rows = search_seats_aero(origins, destinations, date_from, date_to, cabins_str, programs)
+        cabin_pref_try = try_cabin if try_cabin != "any" else None
+        deals = _score_rows(rows, cabin_pref_try)
+        # Filter to only deals matching this cabin (score_row may include lower cabins)
+        matching = [d for d in deals if d["cabin"] == try_cabin] if try_cabin != "any" else deals
+        if matching:
+            deals = deals  # keep full list (includes economy context rows)
+            effective_cabin = try_cabin
+            cabin_pref = cabin_pref_try
+            if try_cabin != cabin:
+                cabin_label = {"business": "Business", "premium": "Premium Economy",
+                               "economy": "Economy", "first": "First"}.get(try_cabin, try_cabin.title())
+                orig_label  = {"business": "Business", "premium": "Premium Economy",
+                               "economy": "Economy", "first": "First"}.get(cabin, cabin.title())
+                cabin_fallback_info = {
+                    "reason": "cabin_unavailable",
+                    "requested_cabin": cabin,
+                    "found_cabin": try_cabin,
+                    "message": f"No {orig_label} availability on {date_from}. Showing {cabin_label} options instead.",
+                }
+            break
 
-    # ── Score rows using cached prices ────────────────────────────────────────
-    deals, seen = [], set()
-    for row in rows:
-        d = score_row(row, cabin_pref)
-        if d is None:
+    # ── Flex-date fallback ────────────────────────────────────────────────────
+    # Case 1: no results at all (even after cabin fallback) → search ±3 days
+    # Case 2: results found but cheapest is >50% more expensive than the best
+    #         deal within ±3 days → surface those cheaper alt-date options
+    flex_info = None
+    cabins_str = cabin_api_map.get(effective_cabin, effective_cabin)
+
+    if not deals:
+        # No results on any cabin — search ±3 days with full cabin fallback
+        import datetime
+        base = datetime.date.fromisoformat(date_from)
+        flex_start = (base - datetime.timedelta(days=3)).strftime("%Y-%m-%d")
+        flex_end   = (base + datetime.timedelta(days=3)).strftime("%Y-%m-%d")
+        # Try all cabins in fallback order across the flex window
+        all_alt_deals = []
+        for try_cabin in cabin_fallback_chain:
+            cabins_str_try = cabin_api_map.get(try_cabin, try_cabin)
+            rows2 = search_seats_aero(origins, destinations, flex_start, flex_end, cabins_str_try, programs)
+            cabin_pref_try = try_cabin if try_cabin != "any" else None
+            alt = _score_rows(rows2, cabin_pref_try)
+            alt = [d for d in alt if d["date"] != date_from]
+            if alt:
+                all_alt_deals = alt
+                effective_cabin = try_cabin
+                cabin_pref = cabin_pref_try
+                break
+        for d in all_alt_deals:
+            d["alt_date"] = True
+        all_alt_deals.sort(key=lambda x: (not x["direct"], x["arb_price_usd"]))
+
+        if all_alt_deals:
+            flex_info = {
+                "reason": "no_results_on_date",
+                "searched_date": date_from,
+                "flex_range": f"{flex_start} to {flex_end}",
+                "message": f"No availability found on {date_from}. Showing best options within ±3 days.",
+            }
+            if cabin_fallback_info:
+                flex_info["message"] += f" ({cabin_fallback_info['message']})"
+            deals = all_alt_deals
+
+    else:
+        # Results found — check if ±3 days has something >33% cheaper (i.e. target is >150% of best alt)
+        best_price = deals[0]["arb_price_usd"]
+        alt_deals, flex_start, flex_end = _flex_date_search(
+            origins, destinations, date_from, cabin, cabin_api_map, programs,
+            target_price=best_price,
+            flex_days=3, price_threshold=1.5,
+        )
+        if alt_deals:
+            # Merge alt deals into results (they're already marked alt_date=True)
+            existing_keys = {(d["origin"], d["destination"], d["program"], d["cabin"], d["date"]) for d in deals}
+            new_alts = [d for d in alt_deals if (d["origin"], d["destination"], d["program"], d["cabin"], d["date"]) not in existing_keys]
+            if new_alts:
+                best_alt_price = new_alts[0]["arb_price_usd"]
+                pct_cheaper = round((best_price - best_alt_price) / best_price * 100)
+                flex_info = {
+                    "reason": "cheaper_nearby_date",
+                    "searched_date": date_from,
+                    "flex_range": f"{flex_start} to {flex_end}",
+                    "message": f"Flights on {date_from} are available but up to {pct_cheaper}% cheaper on nearby dates. Alt-date options shown below.",
+                    "best_price_on_date": best_price,
+                    "best_alt_price": best_alt_price,
+                }
+                deals = deals + new_alts
+
+    # ── Expand deals into individual trip itineraries ────────────────────────
+    # Each deal is a route-level result. Fetch its trips and emit one result
+    # per itinerary so the UI shows separate cards per flight option.
+    expanded = []
+    seen_trip_ids = set()
+    for deal in deals:
+        avail_id = deal.get("availability_id", "")
+        requested_cabin = deal.get("cabin", cabin)
+        if not avail_id:
+            expanded.append(deal)
             continue
-        key = (d["origin"], d["destination"], d["program"], d["cabin"], d["date"])
-        if key in seen:
-            continue
-        seen.add(key)
-        deals.append(d)
+        try:
+            trips = fetch_trips(avail_id)
+        except Exception:
+            trips = []
 
-    deals.sort(key=lambda x: (not x["direct"], x["arb_price_usd"]))
+        # Filter trips to only the requested cabin
+        cabin_trips = [t for t in trips if (t.get("cabin") or "").lower() == requested_cabin.lower()]
+        if not cabin_trips:
+            # fallback: show all trips if no cabin match
+            cabin_trips = trips
+
+        if not cabin_trips:
+            expanded.append(deal)
+            continue
+
+        for trip in cabin_trips:
+            trip_id = trip.get("trip_id", "")
+            if trip_id and trip_id in seen_trip_ids:
+                continue
+            if trip_id:
+                seen_trip_ids.add(trip_id)
+
+            segments = trip.get("segments", [])
+            carriers = trip.get("carriers", "")
+            carrier_codes = [c.strip() for c in carriers.split(",") if c.strip()] if carriers else []
+            flight_numbers = trip.get("flight_numbers", "")
+            is_direct = trip.get("stops", 1) == 0
+            departs_at = trip.get("departs_at", "")
+            arrives_at = trip.get("arrives_at", "")
+            remaining = trip.get("remaining_seats", deal.get("remaining_seats", 0))
+            trip_miles = trip.get("miles", 0) or deal.get("miles", 0)
+            # taxes_raw is in local currency (CAD usually for Aeroplan), convert to USD
+            taxes_raw = trip.get("taxes_raw", 0) or 0
+            taxes_currency = trip.get("taxes_currency", "USD")
+            trip_taxes = round(taxes_to_usd(taxes_raw, taxes_currency), 2) if taxes_raw else deal.get("taxes_usd", 0)
+
+            # Recompute arb price with trip-level miles/taxes
+            promo_cpp = CURRENT_PROMO_CPP.get(deal.get("program", ""), 2.0)
+            standard_cpp = BUY_MILES_INFO.get(deal.get("program", ""), {}).get("standard_cpp_usd", 2.5)
+            buy_promo = round((trip_miles * promo_cpp) / 100, 2) if trip_miles else deal.get("arb_miles_cost_promo_usd", 0)
+            buy_standard = round((trip_miles * standard_cpp) / 100, 2) if trip_miles else deal.get("arb_miles_cost_usd", 0)
+            arb_price_promo = round(buy_promo + trip_taxes, 2)
+            arb_price_standard = round(buy_standard + trip_taxes, 2)
+
+            entry = {**deal}
+            entry["availability_id"] = avail_id
+            entry["trip_id"] = trip_id or f"{avail_id}-{len(expanded)}"
+            entry["miles"] = trip_miles or deal.get("miles", 0)
+            entry["taxes_usd"] = trip_taxes or deal.get("taxes_usd", 0)
+            entry["arb_miles_cost_promo_usd"] = buy_promo
+            entry["arb_price_promo_usd"] = arb_price_promo
+            entry["arb_miles_cost_usd"] = buy_standard
+            entry["arb_price_usd"] = arb_price_standard
+            entry["direct"] = is_direct
+            entry["stops"] = trip.get("stops", 0)
+            entry["carriers"] = carriers
+            entry["airlines"] = carrier_codes
+            entry["flight_numbers"] = flight_numbers
+            entry["departs_at"] = departs_at
+            entry["arrives_at"] = arrives_at
+            entry["remaining_seats"] = remaining
+            entry["segments"] = segments
+            entry["cabin"] = normalize_cabin(trip.get("cabin", requested_cabin))
+            expanded.append(entry)
+
+    # Sort: requested cabin first, then by arb price
+    def _sort_key(d):
+        cabin_match = 0 if d.get("cabin", "").lower() == cabin.lower() else 1
+        alt = 1 if d.get("alt_date") else 0
+        return (alt, cabin_match, d.get("arb_price_usd", 9999))
+
+    expanded.sort(key=_sort_key)
 
     summary = None
-    if deals:
-        b = deals[0]
+    if expanded:
+        b = next((d for d in expanded if not d.get("alt_date")), expanded[0])
         cash_str = f"~${b['cash_price_usd']:,}" if b.get("cash_price_usd") else "unknown cash price"
+        fn_str = f" · {b['flight_numbers']}" if b.get("flight_numbers") else ""
         summary = (
             f"Best deal: {b['date']} · {b['program_name']} · "
             f"{b['miles']:,} miles + ${b['taxes_usd']:.0f} taxes "
             f"(arb price ~${b['arb_price_usd']:.0f} standard, "
             f"~${b['arb_price_promo_usd']:.0f} at promo). "
-            f"{'Nonstop.' if b['direct'] else 'Connecting.'} "
+            f"{'Nonstop.' if b['direct'] else 'Connecting.'}{fn_str} "
             f"Cash price: {cash_str}."
         )
 
     return {
-        "results": deals[:50],
-        "total_found": len(deals),
+        "results": expanded[:50],
+        "total_found": len(expanded),
         "summary": summary,
+        "flex_date_info": flex_info,
+        "cabin_fallback_info": cabin_fallback_info,
         "query": {"origins": origins, "destinations": destinations,
                   "date_from": date_from, "date_to": date_to,
                   "cabin": cabin, "programs": programs},
@@ -1041,35 +1444,26 @@ def handle_inbound_email(body: dict) -> tuple[dict, int]:
 # ── Full end-to-end booking handler ───────────────────────────────────────────
 
 def _ping_appa(booking_id: int, flight: dict, client: dict, deal: dict):
-    """Fire a hook to Appa to handle the actual booking via browser."""
-    import urllib.request
-    msg = (
-        f"BOOKING REQUEST #{booking_id}\n"
-        f"Passenger: {client.get('first_name')} {client.get('last_name')}\n"
-        f"DOB: {client.get('dob', 'N/A')}\n"
-        f"Passport: {client.get('passport_number', 'N/A')} ({client.get('nationality', 'N/A')})\n"
-        f"Email: {client.get('email', 'N/A')}\n"
-        f"Phone: {client.get('phone', 'N/A')}\n"
-        f"Flight: {flight.get('origin')}→{flight.get('destination')} on {flight.get('date')} ({flight.get('cabin')})\n"
-        f"Miles: {deal.get('miles', 0):,} + ${deal.get('taxes_usd', 0):.2f} taxes\n"
-        f"availability_id: {deal.get('availability_id', '')}\n"
-        f"\nPlease book this now using the Air Canada browser session."
-    )
-    payload = json.dumps({"text": msg, "mode": "now"}).encode()
-    req = urllib.request.Request(
-        "http://localhost:18789/hooks/wake",
-        data=payload,
-        headers={
-            "Authorization": "Bearer flightdash-hook-token-2026",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+    """Launch book_alaska.py to handle the booking automatically."""
+    import sys
+    script = os.path.join(os.path.dirname(__file__), "book_alaska.py")
+    cmd = [
+        sys.executable, script,
+        "--origin",     flight.get("origin", ""),
+        "--dest",       flight.get("destination", ""),
+        "--date",       flight.get("date", ""),
+        "--first",      client.get("first_name", ""),
+        "--last",       client.get("last_name", ""),
+        "--dob",        client.get("dob", ""),
+        "--cabin",      flight.get("cabin", "business"),
+        "--card",       client.get("card_last4", "2002"),
+        "--booking-id", str(booking_id),
+    ]
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            print(f"[book-complete] Appa notified: {resp.status}", flush=True)
+        subprocess.Popen(cmd)
+        print(f"[book-complete] book_alaska.py launched for booking #{booking_id}", flush=True)
     except Exception as e:
-        print(f"[book-complete] Failed to notify Appa: {e}", flush=True)
+        print(f"[book-complete] Failed to launch book_alaska.py: {e}", flush=True)
 
 
 def handle_book_complete(body: dict) -> tuple[dict, int]:
@@ -1080,6 +1474,8 @@ def handle_book_complete(body: dict) -> tuple[dict, int]:
       1. Search seats.aero for best award
       2. Pick a vault with enough miles
       3. Create a pending booking record
+    """
+    """
       4. Ping Appa via webhook — Appa uses the live browser session to complete booking
       5. Return booking_id so UI can poll /api/booking-status/<id>
     """
@@ -1111,9 +1507,9 @@ def handle_book_complete(body: dict) -> tuple[dict, int]:
         rows = search_seats_aero([origin], [destination], date, date, cabin_api_map.get(cabin, "economy"), ["aeroplan"])
         best_deal = None
         for row in rows:
-            d = score_row(row, cabin)
-            if d:
-                best_deal = d
+            scored = score_row(row, cabin)
+            if scored:
+                best_deal = scored[0]
                 break
         if not best_deal:
             return {"error": f"No award availability for {origin}→{destination} on {date}", "step": step}, 404
@@ -1172,7 +1568,10 @@ def handle_booking_status(booking_id: int) -> tuple[dict, int]:
         row = conn.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
         if not row:
             return {"error": "Booking not found"}, 404
-        return dict(row), 200
+        d = dict(row)
+        if d.get("status") == "confirmed" and d.get("aeroplan_ref"):
+            d["confirmation_number"] = d["aeroplan_ref"]
+        return d, 200
     except Exception as e:
         return {"error": str(e)}, 500
 
@@ -1463,7 +1862,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(result, status)
             except ValueError:
                 self.send_json({"error": "Invalid booking id"}, 400)
-        elif self.path.startswith("/api/discover"):
+        elif self.path == "/api/discover" or self.path.startswith("/api/discover?"):
             result, status = handle_discover()
             self.send_json(result, status)
         else:
@@ -1483,7 +1882,21 @@ class Handler(BaseHTTPRequestHandler):
 
         content_type = self.headers.get("Content-Type", "")
 
-        if self.path == "/api/search":
+        if self.path == "/api/discover/refresh":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            # Also accept token in POST body or query string
+            token = ""
+            if raw:
+                try:
+                    token = json.loads(raw).get("token", "")
+                except Exception:
+                    pass
+            if not token:
+                token = qs.get("token", [""])[0]
+            result, status = handle_discover_refresh(token)
+            self.send_json(result, status)
+
+        elif self.path == "/api/search":
             try:
                 body = json.loads(raw)
             except Exception:
@@ -1506,6 +1919,161 @@ class Handler(BaseHTTPRequestHandler):
                         for k, v in _up.parse_qs(raw.decode("utf-8", errors="replace")).items()}
             result, status = handle_inbound_email(body)
             self.send_json(result, status)
+
+        elif self.path == "/api/notify-booking":
+            # Step 1: create pending record. Step 2: ask Appa for approval.
+            # book_alaska.py is NOT launched until /api/booking-approve is called.
+            try:
+                bdata = json.loads(raw) if raw else {}
+            except Exception:
+                bdata = {}
+            text = bdata.get("text", str(bdata))
+            print(f"[notify-booking] {text}", flush=True)
+
+            booking_id = None
+            if all(k in bdata for k in ("origin", "destination", "date", "first_name", "last_name", "dob")):
+                import sqlite3
+                from pathlib import Path
+                db_path = str(Path(__file__).parent / "vault.db")
+                conn = sqlite3.connect(db_path)
+                conn.execute("""
+                    INSERT INTO bookings (vault_id, passenger_name, flight_ref, miles_used, taxes_paid, status)
+                    VALUES (2, ?, ?, 0, 0.0, 'pending_approval')
+                """, (
+                    f"{bdata['first_name']} {bdata['last_name']}",
+                    f"{bdata['origin']}-{bdata['destination']}-{bdata['date']}",
+                ))
+                conn.commit()
+                booking_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                # Store full bdata as JSON in the booking row for later retrieval
+                conn.execute("UPDATE bookings SET aeroplan_ref=? WHERE id=?",
+                             (json.dumps(bdata), booking_id))
+                conn.commit()
+                conn.close()
+                print(f"[notify-booking] Created booking_id={booking_id} (pending_approval)", flush=True)
+
+                # Notify Appa — agent will send Telegram approval request to Sami
+                cabin  = bdata.get('cabin', 'business').title()
+                origin = bdata.get('origin', '?')
+                dest   = bdata.get('destination', '?')
+                date   = bdata.get('date', '?')
+                pax    = f"{bdata['first_name']} {bdata['last_name']}"
+                msg = (
+                    f"\U0001f3ab BOOKING REQUEST #{booking_id}\n"
+                    f"Route: {origin} \u2192 {dest}\n"
+                    f"Date: {date} | Cabin: {cabin}\n"
+                    f"Passenger: {pax}\n"
+                    f"\nApprove or deny:\n"
+                    f"  approve: POST https://api.airbitrage.io/api/booking-approve "
+                    f"body={{\"booking_id\":{booking_id},\"action\":\"approve\",\"token\":\"{BOOKING_APPROVE_TOKEN}\"}}\n"
+                    f"  deny:    same but action=deny"
+                )
+                _notify_appa(msg)
+
+            self.send_json({"ok": True, "booking_id": booking_id, "status": "pending_approval"}, 200)
+            return
+
+        elif self.path == "/api/booking-approve":
+            # Called by Appa (or Sami directly) to approve or deny a pending booking.
+            # Required: { booking_id, action: "approve"|"deny", token }
+            try:
+                bdata = json.loads(raw) if raw else {}
+            except Exception:
+                self.send_json({"error": "Invalid JSON"}, 400)
+                return
+
+            if bdata.get("token") != BOOKING_APPROVE_TOKEN:
+                self.send_json({"error": "unauthorized"}, 403)
+                return
+
+            booking_id = bdata.get("booking_id")
+            action     = bdata.get("action", "").lower()
+
+            if not booking_id or action not in ("approve", "deny"):
+                self.send_json({"error": "booking_id and action (approve|deny) required"}, 400)
+                return
+
+            import sqlite3
+            from pathlib import Path
+            db_path = str(Path(__file__).parent / "vault.db")
+            conn = sqlite3.connect(db_path)
+            row = conn.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
+            if not row:
+                conn.close()
+                self.send_json({"error": "Booking not found"}, 404)
+                return
+
+            # Parse stored bdata from aeroplan_ref column (we stash JSON there temporarily)
+            cols = [d[0] for d in conn.execute("PRAGMA table_info(bookings)").fetchall()]
+            row_dict = dict(zip(cols, row))
+
+            if action == "deny":
+                conn.execute("UPDATE bookings SET status='denied' WHERE id=?", (booking_id,))
+                conn.commit()
+                conn.close()
+                _notify_appa(f"\u274c Booking #{booking_id} denied. No action taken.")
+                self.send_json({"ok": True, "status": "denied", "booking_id": booking_id})
+                return
+
+            # Approve: update status and launch book_alaska.py
+            conn.execute("UPDATE bookings SET status='approved' WHERE id=?", (booking_id,))
+            conn.commit()
+            conn.close()
+
+            try:
+                stored = json.loads(row_dict.get("aeroplan_ref", "{}"))
+            except Exception:
+                stored = {}
+
+            import subprocess, sys
+            script = os.path.join(os.path.dirname(__file__), "book_alaska.py")
+            cmd = [
+                sys.executable, script,
+                "--origin",     stored.get("origin", ""),
+                "--dest",       stored.get("destination", ""),
+                "--date",       stored.get("date", ""),
+                "--first",      stored.get("first_name", ""),
+                "--last",       stored.get("last_name", ""),
+                "--dob",        stored.get("dob", ""),
+                "--cabin",      stored.get("cabin", "business"),
+                "--card",       stored.get("card_last4", "2002"),
+                "--booking-id", str(booking_id),
+            ]
+            print(f"[booking-approve] Approved #{booking_id}, launching book_alaska: {' '.join(cmd)}", flush=True)
+            subprocess.Popen(cmd)
+            _notify_appa(f"\u2705 Booking #{booking_id} approved — book_alaska.py launched. Will confirm when done.")
+            self.send_json({"ok": True, "status": "approved", "booking_id": booking_id})
+            return
+
+        elif self.path == "/api/kill":
+            # Kill switch: stop all running book_alaska.py processes.
+            # Required: { token }
+            try:
+                bdata = json.loads(raw) if raw else {}
+            except Exception:
+                self.send_json({"error": "Invalid JSON"}, 400)
+                return
+
+            if bdata.get("token") != KILL_TOKEN:
+                self.send_json({"error": "unauthorized"}, 403)
+                return
+
+            import subprocess
+            result = subprocess.run(["pkill", "-f", "book_alaska.py"], capture_output=True)
+            killed = result.returncode == 0
+
+            # Also mark all pending/approved bookings as cancelled
+            import sqlite3
+            from pathlib import Path
+            db_path = str(Path(__file__).parent / "vault.db")
+            conn = sqlite3.connect(db_path)
+            conn.execute("UPDATE bookings SET status='cancelled' WHERE status IN ('pending_approval','approved')")
+            conn.commit()
+            conn.close()
+
+            _notify_appa("\U0001f6d1 KILL SWITCH activated. All booking processes stopped and pending bookings cancelled.")
+            self.send_json({"ok": True, "killed": killed})
+            return
 
         elif self.path == "/api/book-complete":
             try:
@@ -1558,15 +2126,19 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    port = 8787
-    print(f"✈️  Flight Search API v2.0  →  http://localhost:{port}")
-    print(f"   POST /api/search           search for award flights")
-    print(f"   GET  /api/trips/<id>       flight details for an availability")
-    print(f"   GET  /health               health check")
-    print(f"   POST /api/inbound-email    Mailgun inbound webhook (2FA codes)")
-    print(f"   POST /api/create-checkout  create Stripe Checkout session")
-    print(f"   POST /api/stripe-webhook   Stripe payment webhook → triggers booking")
-    print(f"   POST /api/book-complete    End-to-end award booking automation")
+    port = int(os.environ.get("PORT", 8787))
+    host = "0.0.0.0" if os.environ.get("RAILWAY_ENVIRONMENT") else "localhost"
+    print(f"✈️  Flight Search API v2.0  →  http://{host}:{port}")
+    print(f"   POST /api/search              search for award flights")
+    print(f"   GET  /api/trips/<id>          flight details for an availability")
+    print(f"   GET  /health                  health check")
+    print(f"   GET  /api/discover            get daily discover tiles (cached)")
+    print(f"   POST /api/discover/refresh    rebuild discover cache (cron use)")
+    print(f"   POST /api/inbound-email       Mailgun inbound webhook (2FA codes)")
+    print(f"   POST /api/create-checkout     create Stripe Checkout session")
+    print(f"   POST /api/stripe-webhook      Stripe payment webhook → triggers booking")
+    print(f"   POST /api/book-complete       End-to-end award booking automation")
     print()
-    server = HTTPServer(("localhost", port), Handler)
+    _load_discover_cache_from_disk()
+    server = HTTPServer((host, port), Handler)
     server.serve_forever()
