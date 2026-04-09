@@ -1736,6 +1736,84 @@ def api_auth_login():
 BOOKING_APPROVE_TOKEN = os.environ.get("BOOKING_APPROVE_TOKEN", "booking-approve-token-2026")
 KILL_TOKEN             = os.environ.get("KILL_TOKEN",             "kill-switch-token-2026")
 
+# Pre-cached review links by (program, cabin) — no API call needed
+_CABIN_REVIEWS = {
+    ("virginatlantic", "premium"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/virgin-atlantic-premium-economy/",
+        "title":   "Is Virgin Atlantic Premium Economy Worth It? [2025]",
+        "snippet": "Virgin Atlantic's Premium Economy offers a wider seat, better meals, and priority boarding — a solid middle ground on transatlantic routes.",
+    },
+    ("virginatlantic", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/virgin-atlantic-upper-class/",
+        "title":   "Virgin Atlantic Upper Class Review [2025]",
+        "snippet": "Virgin Atlantic Upper Class features a fully flat bed, onboard bar, and one of the best business class products across the Atlantic.",
+    },
+    ("aeroplan", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/air-canada-business-class/",
+        "title":   "Air Canada Business Class Review [2025]",
+        "snippet": "Air Canada's Signature Class offers fully flat beds and excellent partner redemptions via Aeroplan.",
+    },
+    ("alaska", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/alaska-airlines-first-class/",
+        "title":   "Alaska Airlines First Class Review [2025]",
+        "snippet": "Alaska First Class delivers solid domestic comfort with great Mileage Plan redemption value.",
+    },
+    ("american", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/american-airlines-business-class/",
+        "title":   "American Airlines Business Class Review [2025]",
+        "snippet": "American's Flagship Business is a competitive international product with lie-flat seats and solid dining.",
+    },
+    ("flyingblue", "business"): {
+        "url":     "https://upgradedpoints.com/travel/airlines/air-france-business-class/",
+        "title":   "Air France Business Class Review [2025]",
+        "snippet": "Air France's Business cabin features the famous long chair seat and exceptional French cuisine.",
+    },
+}
+_DEFAULT_REVIEW = {
+    "url":     "https://thepointsguy.com/guide/best-business-class-airlines/",
+    "title":   "Best Business Class Airlines [2025]",
+    "snippet": "A guide to the world's top business class products and how to book them with points.",
+}
+
+
+def _generate_flyai_ref() -> str:
+    import random, string
+    chars = string.ascii_uppercase + string.digits
+    return "FLY-" + "".join(random.choices(chars, k=6))
+
+
+def _build_google_flights_url(origin, destination, date, cabin, flight_numbers="") -> str:
+    import urllib.parse
+    cabin_label = {"economy": "economy", "premium": "premium economy",
+                   "business": "business class", "first": "first class"}.get(cabin.lower(), "business class")
+    fn_str = f" {flight_numbers}" if flight_numbers else ""
+    query = f"one way {cabin_label} flight {origin} to {destination} {date}{fn_str}"
+    return f"https://www.google.com/travel/flights?q={urllib.parse.quote(query)}&curr=USD"
+
+
+def _build_enrichment(flight: dict) -> dict:
+    """Build instant enrichment — all local, zero latency."""
+    program      = flight.get("program", "").lower()
+    cabin        = flight.get("cabin", "business").lower()
+    origin       = flight.get("origin", "")
+    destination  = flight.get("destination", "")
+    date         = flight.get("date", "")
+    flight_nums  = flight.get("flight_numbers", "")
+
+    flyai_ref    = _generate_flyai_ref()
+    gf_url       = _build_google_flights_url(origin, destination, date, cabin, flight_nums)
+    review       = _CABIN_REVIEWS.get((program, cabin)) or \
+                   _CABIN_REVIEWS.get((program, "business")) or \
+                   _DEFAULT_REVIEW
+
+    return {
+        "flyai_ref":          flyai_ref,
+        "google_flights_url": gf_url,
+        "review_url":         review["url"],
+        "review_title":       review["title"],
+        "review_snippet":     review["snippet"],
+    }
+
 
 def _appa_notify(text: str):
     """Send a wake-text to Appa's hook."""
@@ -1775,8 +1853,12 @@ def api_book_complete():
     if not all([origin, destination, date, first_name, last_name]):
         return jsonify({"error": "Missing required fields in flight or client"}), 400
 
-    # Store as pending_approval — Appa must approve before booking fires
+    # Generate enrichment instantly (all local, zero latency)
     import json as _json
+    enrichment = _build_enrichment(flight)
+    flyai_ref  = enrichment["flyai_ref"]
+
+    # Store as pending_approval — Appa must approve before booking fires
     conn = _get_db()
     conn.execute(
         "INSERT INTO bookings (vault_id, passenger_name, flight_ref, miles_used, taxes_paid, status) "
@@ -1785,17 +1867,21 @@ def api_book_complete():
     )
     conn.commit()
     booking_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    # Stash full payload in aeroplan_ref for retrieval on approval
-    conn.execute("UPDATE bookings SET aeroplan_ref=? WHERE id=?",
-                 (_json.dumps({**data, "flight": flight, "client": client}), booking_id))
+    # Stash full payload + enrichment for retrieval on approval/polling
+    conn.execute(
+        "UPDATE bookings SET aeroplan_ref=?, flyai_ref=?, enrichment=? WHERE id=?",
+        (_json.dumps({**data, "flight": flight, "client": client}),
+         flyai_ref, _json.dumps(enrichment), booking_id)
+    )
     conn.commit()
     conn.close()
 
-    # Notify Appa
+    # Notify Appa (non-blocking — runs after response is already formed)
+    flight_nums = flight.get("flight_numbers", "")
     msg = (
-        f"\U0001f3ab BOOKING REQUEST #{booking_id}\n"
+        f"\U0001f3ab BOOKING REQUEST #{booking_id} [{flyai_ref}]\n"
         f"Route: {origin} \u2192 {destination}\n"
-        f"Date: {date} | Cabin: {cabin.title()}\n"
+        f"Date: {date} | Cabin: {cabin.title()}{' | ' + flight_nums if flight_nums else ''}\n"
         f"Passenger: {first_name} {last_name}\n"
         f"\nApprove or deny:\n"
         f"  approve: POST https://api.airbitrage.io/api/booking-approve "
@@ -1805,9 +1891,11 @@ def api_book_complete():
     _appa_notify(msg)
 
     return jsonify({
-        "status":     "pending_approval",
-        "booking_id": booking_id,
-        "message":    f"Booking #{booking_id} received — awaiting approval. Poll /api/booking-status/{booking_id}",
+        "status":          "pending_approval",
+        "booking_id":      booking_id,
+        "flyai_ref":       flyai_ref,
+        "enrichment":      enrichment,
+        "message":         f"Booking #{booking_id} received — awaiting approval. Poll /api/booking-status/{booking_id}",
     }), 202
 
 
