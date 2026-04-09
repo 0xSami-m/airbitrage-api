@@ -1889,36 +1889,90 @@ def _build_kayak_url(origin, destination, date, cabin, carriers=None) -> str:
     return url
 
 
+# Airline name lookup for review search queries
+_CARRIER_NAMES = {
+    "AC": "Air Canada", "LX": "SWISS", "LH": "Lufthansa", "UA": "United",
+    "AA": "American Airlines", "DL": "Delta", "AS": "Alaska Airlines",
+    "BA": "British Airways", "AF": "Air France", "KL": "KLM",
+    "VS": "Virgin Atlantic", "NH": "ANA", "JL": "Japan Airlines",
+    "SQ": "Singapore Airlines", "CX": "Cathay Pacific", "EK": "Emirates",
+    "EY": "Etihad", "QR": "Qatar Airways", "TK": "Turkish Airlines",
+    "OS": "Austrian", "SK": "SAS", "AY": "Finnair", "IB": "Iberia",
+    "TP": "TAP Air Portugal", "KE": "Korean Air", "OZ": "Asiana",
+}
+
+
+def _search_review(airline_name: str, cabin: str) -> dict:
+    """Search DuckDuckGo for a real-time cabin review. Falls back to default."""
+    cabin_label = {"business": "Business Class", "first": "First Class",
+                   "premium": "Premium Economy", "economy": "Economy"}.get(cabin, "Business Class")
+    query = f"{airline_name} {cabin_label} review 2025"
+    try:
+        resp = _requests.get(
+            "https://api.duckduckgo.com/",
+            params={"q": query, "format": "json", "no_redirect": 1, "no_html": 1},
+            timeout=5,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        data = resp.json()
+        # Try AbstractURL first (Wikipedia-style)
+        if data.get("AbstractURL") and data.get("AbstractText"):
+            return {
+                "url":     data["AbstractURL"],
+                "title":   data.get("Heading", f"{airline_name} {cabin_label}"),
+                "snippet": data["AbstractText"][:200],
+            }
+        # Try RelatedTopics
+        for topic in data.get("RelatedTopics", [])[:3]:
+            if isinstance(topic, dict) and topic.get("FirstURL") and topic.get("Text"):
+                return {
+                    "url":     topic["FirstURL"],
+                    "title":   f"{airline_name} {cabin_label} Review [2025]",
+                    "snippet": topic["Text"][:200],
+                }
+    except Exception as e:
+        print(f"[review-search] failed for {airline_name} {cabin_label}: {e}")
+
+    # Fallback: Google search link (user can click through)
+    import urllib.parse
+    search_url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
+    return {
+        "url":     search_url,
+        "title":   f"{airline_name} {cabin_label} Review [2025]",
+        "snippet": f"Click to read reviews of {airline_name} {cabin_label} from frequent flyers and travel experts.",
+    }
+
+
 def _build_enrichment(flight: dict) -> dict:
-    """Build instant enrichment — all local, zero latency."""
-    program     = flight.get("program", "").lower()
+    """Build instant enrichment. Kayak URL + FlyAi ref are instant; review is a fast live search."""
     cabin       = flight.get("cabin", "business").lower()
     origin      = flight.get("origin", "")
     destination = flight.get("destination", "")
     date        = flight.get("date", "")
     carriers    = flight.get("carriers", None)
+    program_name = flight.get("program_name", "")
 
-    # Resolve primary operating carrier (first in list)
+    # Resolve primary operating carrier
     carrier_code = None
     if carriers:
         codes = carriers if isinstance(carriers, list) else [carriers]
         carrier_code = codes[0].upper() if codes else None
 
-    flyai_ref = _generate_flyai_ref()
-    kayak_url = _build_kayak_url(origin, destination, date, cabin, carriers)
-
-    # Review: carrier-specific first, then program-level, then default
-    review = (
-        (carrier_code and _CARRIER_REVIEWS.get((carrier_code, cabin))) or
-        (carrier_code and _CARRIER_REVIEWS.get((carrier_code, "business"))) or
-        _CABIN_REVIEWS.get((program, cabin)) or
-        _CABIN_REVIEWS.get((program, "business")) or
-        _DEFAULT_REVIEW
+    # Airline name for review search
+    airline_name = (
+        _CARRIER_NAMES.get(carrier_code, "") or
+        program_name or
+        carrier_code or
+        "airline"
     )
 
+    flyai_ref = _generate_flyai_ref()
+    kayak_url = _build_kayak_url(origin, destination, date, cabin, carriers)
+    review    = _search_review(airline_name, cabin)
+
     return {
-        "flyai_ref":  flyai_ref,
-        "kayak_url":  kayak_url,
+        "flyai_ref":      flyai_ref,
+        "kayak_url":      kayak_url,
         "review_url":     review["url"],
         "review_title":   review["title"],
         "review_snippet": review["snippet"],
