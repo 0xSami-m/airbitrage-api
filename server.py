@@ -650,6 +650,8 @@ def score_row(row, cabin_pref):
     for cabin_name, prefix in check:
         if not row.get(f"{prefix}Available"):
             continue
+        if int(row.get(f"{prefix}RemainingSeats") or 0) <= 0:
+            continue
         miles = int(row.get(f"{prefix}MileageCost") or 0)
         if miles <= 0:
             continue
@@ -924,6 +926,8 @@ def build_discover_tiles():
         for cabin_name, prefix in [("first", "F"), ("business", "J")]:
             if not row.get(f"{prefix}Available"):
                 continue
+            if int(row.get(f"{prefix}RemainingSeats") or 0) <= 0:
+                continue
             miles = int(row.get(f"{prefix}MileageCost") or 0)
             if miles <= 0:
                 continue
@@ -1091,7 +1095,7 @@ def _score_rows(rows, cabin_pref):
         dest  = route.get("DestinationAirport", "")
         date  = row.get("Date", "")
         for cabin_name, prefix in cabin_iters:
-            if row.get(f"{prefix}Available") and int(row.get(f"{prefix}MileageCost") or 0) > 0:
+            if row.get(f"{prefix}Available") and int(row.get(f"{prefix}MileageCost") or 0) > 0 and int(row.get(f"{prefix}RemainingSeats") or 0) > 0:
                 airline_codes = [a.strip() for a in (row.get(f"{prefix}AirlinesRaw") or "").split(",") if a.strip()]
                 is_direct     = bool(row.get(f"{prefix}Direct", False))
                 combos.add((orig, dest, date, cabin_name,
