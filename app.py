@@ -2477,7 +2477,7 @@ def api_book_complete():
     except Exception as e:
         print(f"[book-complete] Failed to launch {script_file}: {e}", flush=True)
 
-    # Notify Appa
+    # Notify Appa + Telegram
     flight_nums = flight.get("flight_numbers", "")
     msg = (
         f"\U0001f3ab NEW BOOKING #{booking_id} [{flyai_ref}]\n"
@@ -2485,9 +2485,21 @@ def api_book_complete():
         f"Date: {date} | Cabin: {cabin.title()}{' | ' + flight_nums if flight_nums else ''}\n"
         f"Passenger: {first_name} {last_name}\n"
         f"Program: {flight.get('program_name', program)}\n"
-        f"Agent: {script_file} launched"
+        f"Miles: {flight.get('miles', '?'):,} + ${flight.get('taxes_usd', '?')} taxes"
     )
     _appa_notify(msg)
+    # Also wake Appa's session directly with full booking context
+    try:
+        _requests.post(
+            os.getenv("APPA_HOOK_URL", "https://hooks.airbitrage.io/hooks/wake"),
+            headers={"Authorization": f"Bearer {os.getenv('APPA_TOKEN', 'flightdash-hook-token-2026')}",
+                     "Content-Type": "application/json"},
+            json={"text": msg, "mode": "now", "booking_id": booking_id,
+                  "booking": {**data, "flight": flight, "client": client}},
+            timeout=8,
+        )
+    except Exception as e:
+        print(f"[book-complete] appa wake failed: {e}")
 
     return jsonify({
         "status":     "processing",
